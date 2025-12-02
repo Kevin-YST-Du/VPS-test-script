@@ -16,7 +16,7 @@ NC='\033[0m'
 display_menu() {
     clear
     echo -e "${BLUE}=====================================${NC}"
-    echo -e "${YELLOW}           系统设置脚本菜单            ${NC}"
+    echo -e "${YELLOW}           系统设置脚本菜单            ${NC}"
     echo -e "${BLUE}=====================================${NC}"
     echo -e "${GREEN}1. 修改 root 用户密码${NC}"
     echo -e "${GREEN}2. 修改 SSH 端口号${NC}"
@@ -29,8 +29,9 @@ display_menu() {
     echo -e "${GREEN}9. 注册 RHEL 系统（subscription-manager / rhc）${NC}"
     echo -e "${GREEN}10. 自动配置 IPv6（智能检测）${NC}"
     echo -e "${GREEN}11. 退出${NC}"
+    echo -e "${GREEN}12. 重启所有网卡连接（智能识别）${NC}" # <-- 新增
     echo -e "${BLUE}=====================================${NC}"
-    read -p "请选择功能 [1-11]: " mu
+    read -p "请选择功能 [1-12]: " mu # <-- 更新选择范围
 }
 
 # 函数：检查并重启 SSH 服务
@@ -56,6 +57,88 @@ restart_ssh_service() {
         return 1
     fi
 }
+
+# 函数：重启所有网卡连接（根据系统类型智能判断）
+restart_all_interfaces() {
+    echo -e "${BLUE}==============================${NC}"
+    echo -e "${YELLOW}       智能重启所有网卡连接       ${NC}"
+    echo -e "${BLUE}==============================${NC}"
+
+    if command -v netplan >/dev/null 2>&1; then
+        # ----------------------------------------------------
+        # Ubuntu/Netplan 系统
+        # ----------------------------------------------------
+        echo -e "${GREEN}✔ 检测到 Ubuntu (使用 Netplan)${NC}"
+        echo -e "${YELLOW}正在应用 Netplan 配置...${NC}"
+        sudo netplan apply
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}Netplan 配置已成功应用。${NC}"
+        else
+            echo -e "${RED}Netplan 应用失败，请检查配置。${NC}"
+        fi
+        
+    elif command -v systemctl >/dev/null 2>&1 && systemctl status networking >/dev/null 2>&1; then
+        # ----------------------------------------------------
+        # Debian/使用 ifupdown 且 systemctl 管理 networking 服务
+        # ----------------------------------------------------
+        echo -e "${GREEN}✔ 检测到 Debian/旧版 Ubuntu (使用 ifupdown)${NC}"
+        echo -e "${YELLOW}正在重启 networking 服务...${NC}"
+        sudo systemctl restart networking
+        if [ $? -eq 0 ]; then
+            echo -e "${GREEN}Networking 服务已成功重启。${NC}"
+        else
+            echo -e "${RED}Networking 服务重启失败。${NC}"
+        fi
+        
+    elif command -v nmcli >/dev/null 2>&1; then
+        # ----------------------------------------------------
+        # CentOS/RedHat/使用 NetworkManager 系统
+        # ----------------------------------------------------
+        echo -e "${GREEN}✔ 检测到 CentOS/RHEL/使用 NetworkManager${NC}"
+        echo -e "${YELLOW}正在识别并重启所有非 lo 接口...${NC}"
+
+        # 识别所有非 'lo' 接口的设备名（仅限以太网和 Wi-Fi）
+        DEVICES=$(nmcli -t -f DEVICE,TYPE device status | grep -E 'ethernet|wifi' | awk -F: '{print $1}')
+        
+        if [ -z "$DEVICES" ]; then
+            echo -e "${YELLOW}未找到任何可管理的物理/虚拟接口。${NC}"
+            return 1
+        fi
+
+        echo -e "${BLUE}找到以下接口进行重启: ${DEVICES}${NC}"
+        
+        for DEV in $DEVICES; do
+            echo -n " - 重启接口 ${DEV}..."
+            # 使用 nmcli dev disconnect/connect 来确保 DHCP 租约被刷新
+            # nmcli dev connect "$DEV" 即可激活
+            sudo nmcli dev disconnect "$DEV" 2>/dev/null || true
+            sudo nmcli dev connect "$DEV"
+            if [ $? -eq 0 ]; then
+                echo -e "${GREEN}成功${NC}"
+            else
+                echo -e "${RED}失败${NC}"
+                # 如果 connect 失败，尝试用连接名 up
+                CON_NAME=$(nmcli -t -f DEVICE,NAME connection show --active | grep "^$DEV:" | awk -F: '{print $2}')
+                if [ -n "$CON_NAME" ]; then
+                    echo -n "   尝试使用连接名 ${CON_NAME}..."
+                    sudo nmcli con down "$CON_NAME" 2>/dev/null || true
+                    sudo nmcli con up "$CON_NAME"
+                    if [ $? -eq 0 ]; then
+                        echo -e "${GREEN}成功 (通过连接名)${NC}"
+                    else
+                        echo -e "${RED}失败 (请检查 NetworkManager 状态)${NC}"
+                    fi
+                fi
+            fi
+        done
+        echo -e "${GREEN}所有网卡连接重启操作完成。${NC}"
+
+    else
+        echo -e "${RED}❌ 无法识别当前系统或网络管理工具（未找到 Netplan, networking 服务或 nmcli）。${NC}"
+        return 1
+    fi
+}
+
 
 # 函数：配置 root 用户 SSH 密钥认证 (已修改)
 ssh_key() {
@@ -154,7 +237,7 @@ user_ssh_key() {
 
         # 允许 root 登录（全局设置） - 保留原脚本逻辑
         $su sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
-        $su grep -q '^PermitRootLogin' /etc/ssh/sshd_config || $su sh -c "echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config"
+        $su grep -q '^PermitRootLogin' /etc/ssh/sssd_config || $su sh -c "echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config"
 
         MSG="用户 $current_user 现在支持 密码登录 + 密钥登录"
     else
@@ -304,9 +387,9 @@ fire_batch_operation() {
                 # 核心改动：未指定协议时弹出子菜单
                 # ----------------------------------------------
                 echo -e "\n${YELLOW}检测到端口 $port 未指定协议。请选择操作类型:${NC}"
-                echo -e "  ${GREEN}1. 仅 TCP${NC}"
-                echo -e "  ${GREEN}2. 仅 UDP${NC}"
-                echo -e "  ${GREEN}3. TCP 和 UDP (同时)${NC}"
+                echo -e "  ${GREEN}1. 仅 TCP${NC}"
+                echo -e "  ${GREEN}2. 仅 UDP${NC}"
+                echo -e "  ${GREEN}3. TCP 和 UDP (同时)${NC}"
                 read -p "请选择协议类型 [1-3]: " protocol_choice
 
                 case "$protocol_choice" in
@@ -555,12 +638,12 @@ set_swap() {
             swapoff "$SWAP_PATH"
             [ -f "$SWAP_PATH" ] && rm -f "$SWAP_PATH"
             sed -i "\|^$SWAP_PATH |d" /etc/fstab
-            echo -e "${GREEN}Swap $SWAP_PATH 已删除。${NC}"
         else
             echo -e "${YELLOW}未找到活跃 Swap，清理残留...${NC}"
             sed -i "\|^$SWAP_PATH |d" /etc/fstab
             [ -f "$SWAP_PATH" ] && rm -f "$SWAP_PATH"
         fi
+        echo -e "${GREEN}Swap $SWAP_PATH 已删除。${NC}"
         free -h
         swapon --show
     }
@@ -619,7 +702,7 @@ register_rhel_system() {
 ipv6_auto_config() {
 
     echo -e "${BLUE}=============================="
-    echo -e "      自动配置 IPv6（强化识别）"
+    echo -e "      自动配置 IPv6（强化识别）"
     echo -e "==============================${NC}"
 
     # 暂时关闭 set -e，避免 grep 没匹配导致整个脚本退出
@@ -661,8 +744,8 @@ ipv6_auto_config() {
     done
 
     echo -e "${YELLOW}📌 IPv6 配置自动检测结果：${NC}"
-    echo -e "   WAN IPv6：${AUTO_WAN_IPV6:-未找到}"
-    echo -e "   Gateway6：${AUTO_GATEWAY6:-未找到}"
+    echo -e "   WAN IPv6：${AUTO_WAN_IPV6:-未找到}"
+    echo -e "   Gateway6：${AUTO_GATEWAY6:-未找到}"
 
     # 3. 尝试从当前系统路由中再兜底一次
     [[ -z "$AUTO_WAN_IPV6" ]] && AUTO_WAN_IPV6=$(ip -6 addr show $INTERFACE | grep "/126" | awk '{print $2}' | head -n1 || true)
@@ -680,9 +763,9 @@ ipv6_auto_config() {
 
     # 5. 让你输入任意前缀的自定义 IPv6
     echo -e "${GREEN}请输入要添加的自定义 IPv6，例如：${NC}"
-    echo -e "   2a0a:8dc0:bc::10"
-    echo -e "   2a0a:8dc0:bc::10/64"
-    echo -e "   2a0a:8dc0:bc::10/128"
+    echo -e "   2a0a:8dc0:bc::10"
+    echo -e "   2a0a:8dc0:bc::10/64"
+    echo -e "   2a0a:8dc0:bc::10/128"
     read -p "IPv6: " USER_IPV6
 
     if [[ "$USER_IPV6" =~ "/" ]]; then
@@ -709,18 +792,18 @@ iface lo inet loopback
 
 allow-hotplug $INTERFACE
 iface $INTERFACE inet static
-    address $IPV4
-    gateway $GATEWAY4
-    dns-nameservers 1.1.1.1 8.8.8.8
+    address $IPV4
+    gateway $GATEWAY4
+    dns-nameservers 1.1.1.1 8.8.8.8
 
 iface $INTERFACE inet6 static
-    address $WAN_IPV6
-    gateway $WAN_GATEWAY
-    dns-nameserver 2606:4700:4700::1111
-    dns-nameserver 2001:4860:4860::8888
+    address $WAN_IPV6
+    gateway $WAN_GATEWAY
+    dns-nameserver 2606:4700:4700::1111
+    dns-nameserver 2001:4860:4860::8888
 
-    post-up ip -6 addr add $USER_IPV6 dev $INTERFACE
-    pre-down ip -6 addr del $USER_IPV6 dev $INTERFACE
+    post-up ip -6 addr add $USER_IPV6 dev $INTERFACE
+    pre-down ip -6 addr del $USER_IPV6 dev $INTERFACE
 EOF
 
     echo -e "${GREEN}✔ IPv6 配置已写入 ${CFG}${NC}"
@@ -751,6 +834,7 @@ while true; do
         9) register_rhel_system ;;
         10) ipv6_auto_config ;;
         11) echo -e "${GREEN}退出脚本${NC}"; exit 0 ;;
+        12) restart_all_interfaces ;; # <-- 新增选项
         *) echo -e "${RED}无效选择${NC}" ;;
     esac
 
