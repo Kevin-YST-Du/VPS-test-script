@@ -16,7 +16,7 @@ NC='\033[0m'
 display_menu() {
     clear
     echo -e "${BLUE}=====================================${NC}"
-    echo -e "${YELLOW}           系统设置脚本菜单            ${NC}"
+    echo -e "${YELLOW}           系统设置脚本菜单            ${NC}"
     echo -e "${BLUE}=====================================${NC}"
     echo -e "${GREEN}1. 修改 root 用户密码${NC}"
     echo -e "${GREEN}2. 修改 SSH 端口号${NC}"
@@ -28,10 +28,10 @@ display_menu() {
     echo -e "${GREEN}8. 管理 Swap${NC}"
     echo -e "${GREEN}9. 注册 RHEL 系统（subscription-manager / rhc）${NC}"
     echo -e "${GREEN}10. 自动配置 IPv6（智能检测）${NC}"
-    echo -e "${GREEN}11. 退出${NC}"
-    echo -e "${GREEN}12. 重启所有网卡连接（智能识别）${NC}" # <-- 新增
+    echo -e "${GREEN}11. 重启所有网卡连接（智能识别）${NC}"
+    echo -e "${GREEN}12. 退出${NC}"
     echo -e "${BLUE}=====================================${NC}"
-    read -p "请选择功能 [1-12]: " mu # <-- 更新选择范围
+    read -p "请选择功能 [1-12]: " mu
 }
 
 # 函数：检查并重启 SSH 服务
@@ -61,7 +61,7 @@ restart_ssh_service() {
 # 函数：重启所有网卡连接（根据系统类型智能判断）
 restart_all_interfaces() {
     echo -e "${BLUE}==============================${NC}"
-    echo -e "${YELLOW}       智能重启所有网卡连接       ${NC}"
+    echo -e "${YELLOW}      智能重启所有网卡连接      ${NC}"
     echo -e "${BLUE}==============================${NC}"
 
     if command -v netplan >/dev/null 2>&1; then
@@ -102,41 +102,51 @@ restart_all_interfaces() {
         
         if [ -z "$DEVICES" ]; then
             echo -e "${YELLOW}未找到任何可管理的物理/虚拟接口。${NC}"
-            return 1
-        fi
+            # 在没有接口的情况下也打印 ip addr
+        else
 
-        echo -e "${BLUE}找到以下接口进行重启: ${DEVICES}${NC}"
-        
-        for DEV in $DEVICES; do
-            echo -n " - 重启接口 ${DEV}..."
-            # 使用 nmcli dev disconnect/connect 来确保 DHCP 租约被刷新
-            # nmcli dev connect "$DEV" 即可激活
-            sudo nmcli dev disconnect "$DEV" 2>/dev/null || true
-            sudo nmcli dev connect "$DEV"
-            if [ $? -eq 0 ]; then
-                echo -e "${GREEN}成功${NC}"
-            else
-                echo -e "${RED}失败${NC}"
-                # 如果 connect 失败，尝试用连接名 up
-                CON_NAME=$(nmcli -t -f DEVICE,NAME connection show --active | grep "^$DEV:" | awk -F: '{print $2}')
-                if [ -n "$CON_NAME" ]; then
-                    echo -n "   尝试使用连接名 ${CON_NAME}..."
-                    sudo nmcli con down "$CON_NAME" 2>/dev/null || true
-                    sudo nmcli con up "$CON_NAME"
-                    if [ $? -eq 0 ]; then
-                        echo -e "${GREEN}成功 (通过连接名)${NC}"
-                    else
-                        echo -e "${RED}失败 (请检查 NetworkManager 状态)${NC}"
+            echo -e "${BLUE}找到以下接口进行重启: ${DEVICES}${NC}"
+            
+            for DEV in $DEVICES; do
+                echo -n " - 重启接口 ${DEV}..."
+                # 使用 nmcli dev disconnect/connect 来确保 DHCP 租约被刷新
+                # nmcli dev connect "$DEV" 即可激活
+                sudo nmcli dev disconnect "$DEV" 2>/dev/null || true
+                sudo nmcli dev connect "$DEV"
+                if [ $? -eq 0 ]; then
+                    echo -e "${GREEN}成功${NC}"
+                else
+                    echo -e "${RED}失败${NC}"
+                    # 如果 connect 失败，尝试用连接名 up
+                    CON_NAME=$(nmcli -t -f DEVICE,NAME connection show --active | grep "^$DEV:" | awk -F: '{print $2}')
+                    if [ -n "$CON_NAME" ]; then
+                        echo -n "   尝试使用连接名 ${CON_NAME}..."
+                        sudo nmcli con down "$CON_NAME" 2>/dev/null || true
+                        sudo nmcli con up "$CON_NAME"
+                        if [ $? -eq 0 ]; then
+                            echo -e "${GREEN}成功 (通过连接名)${NC}"
+                        else
+                            echo -e "${RED}失败 (请检查 NetworkManager 状态)${NC}"
+                        fi
                     fi
                 fi
-            fi
-        done
-        echo -e "${GREEN}所有网卡连接重启操作完成。${NC}"
+            done
+            echo -e "${GREEN}所有网卡连接重启操作完成。${NC}"
+        fi
 
     else
         echo -e "${RED}❌ 无法识别当前系统或网络管理工具（未找到 Netplan, networking 服务或 nmcli）。${NC}"
-        return 1
+        # 即使操作失败也继续打印 ip addr
     fi
+
+    # ============================================
+    # 按照要求，在网卡重启操作完成后，显示 IP 地址信息
+    # ============================================
+    echo -e "${BLUE}==============================${NC}"
+    echo -e "${YELLOW}       当前网络接口状态 (ip addr)      ${NC}"
+    echo -e "${BLUE}==============================${NC}"
+    ip addr
+    echo -e "${BLUE}==============================${NC}"
 }
 
 
@@ -237,7 +247,7 @@ user_ssh_key() {
 
         # 允许 root 登录（全局设置） - 保留原脚本逻辑
         $su sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
-        $su grep -q '^PermitRootLogin' /etc/ssh/sssd_config || $su sh -c "echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config"
+        $su grep -q '^PermitRootLogin' /etc/ssh/sshd_config || $su sh -c "echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config"
 
         MSG="用户 $current_user 现在支持 密码登录 + 密钥登录"
     else
@@ -387,9 +397,9 @@ fire_batch_operation() {
                 # 核心改动：未指定协议时弹出子菜单
                 # ----------------------------------------------
                 echo -e "\n${YELLOW}检测到端口 $port 未指定协议。请选择操作类型:${NC}"
-                echo -e "  ${GREEN}1. 仅 TCP${NC}"
-                echo -e "  ${GREEN}2. 仅 UDP${NC}"
-                echo -e "  ${GREEN}3. TCP 和 UDP (同时)${NC}"
+                echo -e "  ${GREEN}1. 仅 TCP${NC}"
+                echo -e "  ${GREEN}2. 仅 UDP${NC}"
+                echo -e "  ${GREEN}3. TCP 和 UDP (同时)${NC}"
                 read -p "请选择协议类型 [1-3]: " protocol_choice
 
                 case "$protocol_choice" in
@@ -486,8 +496,8 @@ F2b_install() {
     echo -e "${BLUE}选择 Fail2ban 封禁方式${NC}"
     echo -e "${GREEN}1. iptables-allports${NC}"
     echo -e "${GREEN}2. iptables-multiport${NC}"
-    echo -e "${GREEN}3. firewallcmd-ipset${NC}"
-    echo -e "${GREEN}4. ufw${NC}"
+    echo -e "${GREEN}3. firewallcmd-ipset （CentOS/RedHat系统）${NC}"
+    echo -e "${GREEN}4. ufw （Ubuntu/Debian系统）${NC}"
     read -p "请选择封禁方式 [1-4]: " manner1
     case "$manner1" in
         1) manner="iptables-allports" ;;
@@ -511,23 +521,23 @@ F2b_install() {
     $su rm -f /etc/fail2ban/jail.local
     $su tee /etc/fail2ban/jail.local > /dev/null << EOF
 [DEFAULT]
-bantime = 600
-findtime = 300
-maxretry = 5
-banaction = $manner
-action = %(action_mwl)s
+bantime = 600 #默认封禁时间，单位秒
+findtime = 300 #Fail2ban 会查看在过去300秒的日志
+maxretry = 5 #同一个IP允许的最大失败尝试次数
+banaction = $manner #选择封禁方式
+action = %(action_mwl)s #默认的封禁操作
 
 [sshd]
-ignoreip = 127.0.0.1/8 ::1
-enabled = true
-filter = sshd
-port = $fshp
-maxretry = 5
-findtime = 300
-bantime = $time1
-banaction = $manner
-action = %(action_mwl)s
-logpath = %(sshd_log)s
+ignoreip = 127.0.0.1/8 ::1 #忽略这些 IP 地址的连接失败尝试，它们永远不会被封禁。
+enabled = true #启用此 SSH 保护规则。
+filter = sshd #使用 /etc/fail2ban/filter.d/sshd.conf 中定义的过滤器来匹配日志文件中的 SSH 登录失败记录。
+port = $fshp #指定 Fail2ban 应该保护的 SSH 端口。
+maxretry = 5 #失败 5 次后触发封禁。
+findtime = 300 #在 300 秒内查找失败记录。
+bantime = $time1 #封禁时间，单位秒，-1 表示永久封禁。
+banaction = $manner #使用用户选择的封禁方式。
+action = %(action_mwl)s #封禁、发送邮件和记录日志。
+logpath = %(sshd_log)s #使用系统默认的 SSH 日志路径。
 EOF
     $su systemctl restart fail2ban 2>/dev/null || true
     $su systemctl enable fail2ban 2>/dev/null || true
@@ -660,7 +670,7 @@ set_swap() {
 
 
 # ============================================
-# 新功能：注册 RHEL 系统 (修复：使用 read 明文显示输入)
+# 注册 RHEL 系统 (修复：使用 read 明文显示输入)
 # ============================================
 register_rhel_system() {
     echo -e "${BLUE}===== RHEL 系统注册 =====${NC}"
@@ -702,7 +712,7 @@ register_rhel_system() {
 ipv6_auto_config() {
 
     echo -e "${BLUE}=============================="
-    echo -e "      自动配置 IPv6（强化识别）"
+    echo -e "      自动配置 IPv6（强化识别）"
     echo -e "==============================${NC}"
 
     # 暂时关闭 set -e，避免 grep 没匹配导致整个脚本退出
@@ -744,8 +754,8 @@ ipv6_auto_config() {
     done
 
     echo -e "${YELLOW}📌 IPv6 配置自动检测结果：${NC}"
-    echo -e "   WAN IPv6：${AUTO_WAN_IPV6:-未找到}"
-    echo -e "   Gateway6：${AUTO_GATEWAY6:-未找到}"
+    echo -e "   WAN IPv6：${AUTO_WAN_IPV6:-未找到}"
+    echo -e "   Gateway6：${AUTO_GATEWAY6:-未找到}"
 
     # 3. 尝试从当前系统路由中再兜底一次
     [[ -z "$AUTO_WAN_IPV6" ]] && AUTO_WAN_IPV6=$(ip -6 addr show $INTERFACE | grep "/126" | awk '{print $2}' | head -n1 || true)
@@ -763,9 +773,9 @@ ipv6_auto_config() {
 
     # 5. 让你输入任意前缀的自定义 IPv6
     echo -e "${GREEN}请输入要添加的自定义 IPv6，例如：${NC}"
-    echo -e "   2a0a:8dc0:bc::10"
-    echo -e "   2a0a:8dc0:bc::10/64"
-    echo -e "   2a0a:8dc0:bc::10/128"
+    echo -e "   2a0a:8dc0:bc::10"
+    echo -e "   2a0a:8dc0:bc::10/64"
+    echo -e "   2a0a:8dc0:bc::10/128"
     read -p "IPv6: " USER_IPV6
 
     if [[ "$USER_IPV6" =~ "/" ]]; then
@@ -792,18 +802,18 @@ iface lo inet loopback
 
 allow-hotplug $INTERFACE
 iface $INTERFACE inet static
-    address $IPV4
-    gateway $GATEWAY4
-    dns-nameservers 1.1.1.1 8.8.8.8
+    address $IPV4
+    gateway $GATEWAY4
+    dns-nameservers 1.1.1.1 8.8.8.8
 
 iface $INTERFACE inet6 static
-    address $WAN_IPV6
-    gateway $WAN_GATEWAY
-    dns-nameserver 2606:4700:4700::1111
-    dns-nameserver 2001:4860:4860::8888
+    address $WAN_IPV6
+    gateway $WAN_GATEWAY
+    dns-nameserver 2606:4700:4700::1111
+    dns-nameserver 2001:4860:4860::8888
 
-    post-up ip -6 addr add $USER_IPV6 dev $INTERFACE
-    pre-down ip -6 addr del $USER_IPV6 dev $INTERFACE
+    post-up ip -6 addr add $USER_IPV6 dev $INTERFACE
+    pre-down ip -6 addr del $USER_IPV6 dev $INTERFACE
 EOF
 
     echo -e "${GREEN}✔ IPv6 配置已写入 ${CFG}${NC}"
@@ -833,8 +843,8 @@ while true; do
         8) set_swap ;;
         9) register_rhel_system ;;
         10) ipv6_auto_config ;;
-        11) echo -e "${GREEN}退出脚本${NC}"; exit 0 ;;
-        12) restart_all_interfaces ;; # <-- 新增选项
+        11) restart_all_interfaces ;;
+        12) echo -e "${GREEN}退出脚本${NC}"; exit 0 ;;
         *) echo -e "${RED}无效选择${NC}" ;;
     esac
 
