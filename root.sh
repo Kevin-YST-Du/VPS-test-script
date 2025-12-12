@@ -1,14 +1,13 @@
 #!/bin/bash
 
 # ---------------------------------------------------------
-# Linux 服务器管理脚本（增强版）
-# 功能：
-# - 日志系统
-# - 安全确认系统
-# - 自动防火墙检测
-# - SSH 配置、防火墙、交换分区、Fail2ban、RHEL 注册
-# - 智能网络重启
+# Linux 服务器管理脚本（增强版 v2.0）
+# 优化重点：
+# - 深度修复 Root 登录权限（解决 permitrootlogin without-password 问题）
+# - 智能处理 sshd_config.d 覆盖文件
+# - 保持原有的日志、防火墙、安全确认系统
 # ---------------------------------------------------------
+
 # =========================================================
 # 日志系统
 # =========================================================
@@ -53,7 +52,7 @@ display_menu() {
     echo -e "${YELLOW}       服务器系统管理工具 (Pro)       ${NC}"
     echo -e "${BLUE}=====================================${NC}"
 
-    echo -e "${GREEN}1. 修改 root 用户密码${NC}"
+    echo -e "${GREEN}1. 修改 root 用户密码 (优化版 - 强制开启登录)${NC}"
     echo -e "${GREEN}2. 修改 SSH 端口号${NC}"
     echo -e "${GREEN}3. 配置 root SSH 密钥认证${NC}"
     echo -e "${GREEN}4. 配置普通用户 SSH 密钥认证${NC}"
@@ -104,7 +103,7 @@ restart_ssh_service() {
 }
 
 # =========================================================
-#  智能重启所有网卡连接（正确检测：Netplan / NM / ifupdown）
+#  智能重启所有网卡连接
 # =========================================================
 restart_all_interfaces() {
     log "执行网卡重启功能"
@@ -150,16 +149,18 @@ restart_all_interfaces() {
     ip addr
     echo -e "${BLUE}==============================${NC}"
 }
+
 # =========================================================
-# 1. 修改 root 密码
+# 1. 修改 root 密码 (深度优化版)
 # =========================================================
 root_pwd() {
-    echo -e "${BLUE}===== 设置 root 密码 =====${NC}"
+    echo -e "${BLUE}===== 设置 root 密码并强制开启登录 =====${NC}"
 
     confirm_action || return 1
     su=''
     [[ $EUID -ne 0 ]] && su='sudo'
 
+    # --- 1. 密码设置逻辑 ---
     echo -e "${GREEN}1. 生成随机密码${NC}"
     echo -e "${GREEN}2. 输入自定义密码${NC}"
     read -p "请选择 [1-2]: " pwd_choice
@@ -184,12 +185,76 @@ root_pwd() {
     echo "root:$mima" | $su chpasswd
     log "root 密码已修改"
 
-    # 确保 root 密码登录开启
-    $su sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
-    $su sed -i 's/^PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    # --- 2. 深度 SSH 配置修复逻辑 ---
+    echo -e "${YELLOW}正在深度检查 SSH 配置...${NC}"
+
+    local ssh_config="/etc/ssh/sshd_config"
+    local ssh_config_d="/etc/ssh/sshd_config.d"
+
+    # 内部函数：修改或追加配置
+    # 参数 1: 文件路径
+    # 参数 2: 配置项名称
+    # 参数 3: 目标值
+    update_ssh_param() {
+        local file="$1"
+        local param="$2"
+        local value="$3"
+        
+        if [[ -f "$file" ]]; then
+            # 使用 grep 检查是否存在该配置项（无论是否被注释）
+            if grep -qE "^#?${param}" "$file"; then
+                # 替换：处理被注释(#)的情况，也处理已有值的情况
+                $su sed -i -E "s/^#?${param}.*/${param} ${value}/" "$file"
+            else
+                # 如果不存在，追加到文件末尾
+                echo "${param} ${value}" | $su tee -a "$file" >/dev/null
+            fi
+        fi
+    }
+
+    # A. 修复主配置文件
+    update_ssh_param "$ssh_config" "PermitRootLogin" "yes"
+    update_ssh_param "$ssh_config" "PasswordAuthentication" "yes"
+
+    # B. 扫描并修复 include 目录下的覆盖文件 (关键步骤)
+    # 很多云厂商会在 50-cloud-init.conf 里强制禁止 root 登录
+    if [[ -d "$ssh_config_d" ]]; then
+        # 查找所有包含 PermitRootLogin 的 .conf 文件
+        grep -l "PermitRootLogin" "$ssh_config_d"/*.conf 2>/dev/null | while read -r conf_file; do
+            echo -e "${YELLOW}发现覆盖配置，正在修正：${conf_file}${NC}"
+            $su sed -i -E "s/^#?PermitRootLogin.*/PermitRootLogin yes/" "$conf_file"
+        done
+
+        # 查找所有包含 PasswordAuthentication 的 .conf 文件
+        grep -l "PasswordAuthentication" "$ssh_config_d"/*.conf 2>/dev/null | while read -r conf_file; do
+             echo -e "${YELLOW}发现覆盖配置，正在修正：${conf_file}${NC}"
+            $su sed -i -E "s/^#?PasswordAuthentication.*/PasswordAuthentication yes/" "$conf_file"
+        done
+    fi
 
     restart_ssh_service
+    
     echo -e "${GREEN}root 密码已更新：${mima}${NC}"
+    
+    # --- 3. 最终生效验证 ---
+    echo -e "${BLUE}===== SSH 最终生效策略验证 =====${NC}"
+    echo "正在运行 sshd -T 检查最终加载的配置..."
+    # 检查 sshd 是否存在
+    if command -v sshd >/dev/null 2>&1; then
+        # 使用 sshd -T 获取实际生效的配置
+        local effective_config
+        effective_config=$($su sshd -T 2>/dev/null | grep -E "^(permitrootlogin|passwordauthentication)")
+        
+        echo -e "${YELLOW}${effective_config}${NC}"
+        
+        if echo "$effective_config" | grep -q "permitrootlogin yes"; then
+             echo -e "${GREEN}✅ 检测通过：Root 登录已开启 (permitrootlogin yes)${NC}"
+        else
+             echo -e "${RED}❌ 警告：Root 登录似乎仍未开启，请检查是否有只读文件或特殊限制！${NC}"
+        fi
+    else
+        echo -e "${YELLOW}未找到 sshd 命令，跳过验证。${NC}"
+    fi
 }
 
 # =========================================================
@@ -211,9 +276,14 @@ ssh_port() {
 
     $su cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
-    $su sed -i "s/^#Port .*/Port $por/" /etc/ssh/sshd_config
-    $su sed -i "s/^Port .*/Port $por/" /etc/ssh/sshd_config
-    $su sed -i 's/^PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    # 修改端口，同样使用 -E 增强兼容性
+    $su sed -i -E "s/^#?Port .*/Port $por/" /etc/ssh/sshd_config
+    
+    # 确保没有其他 Port 行干扰（删除除第一行外的其他 Port 配置? 比较复杂，这里简单处理）
+    # 如果原文件没有 Port 配置，追加
+    if ! grep -q "^Port" /etc/ssh/sshd_config; then
+         echo "Port $por" | $su tee -a /etc/ssh/sshd_config >/dev/null
+    fi
 
     log "SSH 端口修改为 $por"
     restart_ssh_service
@@ -242,12 +312,12 @@ ssh_key() {
     # 选择是否保留密码登录
     read -p "是否保留密码登录？[y/N]：" enable_password
     if [[ "$enable_password" =~ ^[Yy]$ ]]; then
-        sed -i 's/^PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-        sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+        sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sed -i -E 's/^#?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
         MSG="root 支持密码 + 密钥登录"
     else
-        sed -i 's/^PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
-        sed -i 's/^PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
+        sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+        sed -i -E 's/^#?PermitRootLogin .*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
         MSG="root 仅支持密钥登录"
     fi
 
@@ -282,14 +352,13 @@ user_ssh_key() {
     $su cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
 
     # 启用公钥认证
-    $su sed -i 's/^#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-    $su sed -i 's/^PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    $su sed -i -E 's/^#?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 
     if [[ "$enable_password" =~ ^[Yy]$ ]]; then
-        $su sed -i 's/^PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        $su sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
         MSG="$current_user 支持密码 + 密钥登录"
     else
-        $su sed -i 's/^PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+        $su sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
         MSG="$current_user 仅支持密钥登录"
     fi
 
@@ -304,6 +373,7 @@ user_ssh_key() {
     restart_ssh_service
     echo -e "${GREEN}${MSG}${NC}"
 }
+
 # =========================================================
 # 5. 自动识别并安装防火墙
 # =========================================================
@@ -436,7 +506,6 @@ fire_batch_operation() {
     local operation=$1
     local op_zh=$([[ "$operation" == "open" ]] && echo "开放" || echo "关闭")
 
-    # 自动检测防火墙（必须最先执行）
     detect_firewall
 
     # 如果是关闭端口操作，并且系统使用 UFW，则先展示当前防火墙状态
@@ -446,10 +515,6 @@ fire_batch_operation() {
         echo
     fi
 
-
-    local op_zh=$([[ "$operation" == "open" ]] && echo "开放" || echo "关闭")
-
-    detect_firewall
     [[ -z "$FIREWALL_CMD" ]] && { echo -e "${RED}未检测到已安装的防火墙！${NC}"; return 1; }
 
     choose_port_mode || return 1
@@ -504,17 +569,16 @@ fire_batch_operation() {
         log "端口操作: $pp, FROM=$FROM_IP, op=$operation"
     done
 
-# reload firewall
-[[ "$FIREWALL_CMD" == "firewalld" ]] && $su firewall-cmd --reload
-[[ "$FIREWALL_CMD" == "ufw" ]] && $su ufw reload
+    # reload firewall
+    [[ "$FIREWALL_CMD" == "firewalld" ]] && $su firewall-cmd --reload
+    [[ "$FIREWALL_CMD" == "ufw" ]] && $su ufw reload
 
-echo -e "${GREEN}防火墙规则已更新${NC}"
+    echo -e "${GREEN}防火墙规则已更新${NC}"
 
-# === 新增：如果使用 UFW，则显示当前规则 ===
-if [[ "$FIREWALL_CMD" == "ufw" ]]; then
-    echo -e "${YELLOW}当前 UFW 防火墙规则：${NC}"
-    $su ufw status
-fi
+    if [[ "$FIREWALL_CMD" == "ufw" ]]; then
+        echo -e "${YELLOW}当前 UFW 防火墙规则：${NC}"
+        $su ufw status
+    fi
 }
 
 # =========================================================
@@ -532,6 +596,7 @@ fire_set() {
         *) echo -e "${RED}无效选择${NC}" ;;
     esac
 }
+
 # =========================================================
 # 7. Fail2ban 安装与配置
 # =========================================================
@@ -608,9 +673,6 @@ set_swap() {
 
     DEFAULT_SWAP_FILE="/swapfile"
 
-    # ----------------------
-    # 创建或修改 Swap
-    # ----------------------
     if [[ "$swap_choice" == "1" ]]; then
         confirm_action || return 1
 
@@ -628,7 +690,6 @@ set_swap() {
 
         log "创建/修改 Swap: size=${SWAP_SIZE}G, file=$SWAP_FILE, pri=$SWAP_PRIORITY"
 
-        # swapoff 如果文件已存在
         if swapon --show | grep -q "$SWAP_FILE"; then
             swapoff "$SWAP_FILE"
         fi
@@ -640,7 +701,6 @@ set_swap() {
         mkswap "$SWAP_FILE"
         swapon --priority "$SWAP_PRIORITY" "$SWAP_FILE"
 
-        # fstab 配置
         if $AUTO; then
             if ! grep -q "^$SWAP_FILE" /etc/fstab; then
                 echo "$SWAP_FILE none swap sw,pri=$SWAP_PRIORITY 0 0" >> /etc/fstab
@@ -651,13 +711,9 @@ set_swap() {
 
         echo -e "${GREEN}Swap 已成功创建或修改${NC}"
         log "Swap 创建/修改成功"
-
         free -h
         swapon --show
 
-    # ----------------------
-    # 删除 Swap
-    # ----------------------
     elif [[ "$swap_choice" == "2" ]]; then
         confirm_action || return 1
 
@@ -673,7 +729,6 @@ set_swap() {
 
         echo -e "${GREEN}Swap 已删除${NC}"
         log "Swap 删除成功"
-
         free -h
         swapon --show
     else
@@ -713,6 +768,7 @@ register_rhel_system() {
 
     log "RHEL 注册完成"
 }
+
 # =========================================================
 # 主循环
 # =========================================================
@@ -720,36 +776,16 @@ while true; do
     display_menu
 
     case "$mu" in
-        1)
-            root_pwd
-            ;;
-        2)
-            ssh_port
-            ;;
-        3)
-            ssh_key
-            ;;
-        4)
-            user_ssh_key
-            ;;
-        5)
-            fire_install
-            ;;
-        6)
-            fire_set
-            ;;
-        7)
-            F2b_install
-            ;;
-        8)
-            set_swap
-            ;;
-        9)
-            register_rhel_system
-            ;;
-        10)
-            restart_all_interfaces
-            ;;
+        1) root_pwd ;;
+        2) ssh_port ;;
+        3) ssh_key ;;
+        4) user_ssh_key ;;
+        5) fire_install ;;
+        6) fire_set ;;
+        7) F2b_install ;;
+        8) set_swap ;;
+        9) register_rhel_system ;;
+        10) restart_all_interfaces ;;
         11)
             echo -e "${GREEN}已退出脚本，再见！${NC}"
             log "用户退出脚本"
