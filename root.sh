@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # ---------------------------------------------------------
-# Linux 服务器管理脚本（增强版 v2.0）
+# Linux 服务器管理脚本（增强版 v2.1）
 # 优化重点：
 # - 深度修复 Root 登录权限（解决 permitrootlogin without-password 问题）
 # - 智能处理 sshd_config.d 覆盖文件
 # - 保持原有的日志、防火墙、安全确认系统
+# - [新增] 默认网关切换与冲突修复工具
 # ---------------------------------------------------------
 
 # =========================================================
@@ -62,12 +63,14 @@ display_menu() {
     echo -e "${GREEN}8. 管理 Swap${NC}"
     echo -e "${GREEN}9. 注册 RHEL 系统${NC}"
     echo -e "${GREEN}10. 重启所有网卡连接（自动识别系统）${NC}"
-    echo -e "${GREEN}11. 退出${NC}"
+    echo -e "${GREEN}11. 切换/修复默认网关 (解决双网关冲突)${NC}"
+    echo -e "${GREEN}12. 设置快捷启动键 (设置完自动生效)${NC}"
+    echo -e "${GREEN}13. 退出${NC}"
 
     echo -e "${BLUE}=====================================${NC}"
     echo -e "${GREEN}日志文件位置：${NC} ${YELLOW}/root/root.log${NC}"
     echo -e "${BLUE}=====================================${NC}"
-    read -p "请选择功能 [1-11]: " mu
+    read -p "请选择功能 [1-13]: " mu
 }
 
 # =========================================================
@@ -192,21 +195,15 @@ root_pwd() {
     local ssh_config_d="/etc/ssh/sshd_config.d"
 
     # 内部函数：修改或追加配置
-    # 参数 1: 文件路径
-    # 参数 2: 配置项名称
-    # 参数 3: 目标值
     update_ssh_param() {
         local file="$1"
         local param="$2"
         local value="$3"
         
         if [[ -f "$file" ]]; then
-            # 使用 grep 检查是否存在该配置项（无论是否被注释）
             if grep -qE "^#?${param}" "$file"; then
-                # 替换：处理被注释(#)的情况，也处理已有值的情况
                 $su sed -i -E "s/^#?${param}.*/${param} ${value}/" "$file"
             else
-                # 如果不存在，追加到文件末尾
                 echo "${param} ${value}" | $su tee -a "$file" >/dev/null
             fi
         fi
@@ -216,16 +213,13 @@ root_pwd() {
     update_ssh_param "$ssh_config" "PermitRootLogin" "yes"
     update_ssh_param "$ssh_config" "PasswordAuthentication" "yes"
 
-    # B. 扫描并修复 include 目录下的覆盖文件 (关键步骤)
-    # 很多云厂商会在 50-cloud-init.conf 里强制禁止 root 登录
+    # B. 扫描并修复 include 目录下的覆盖文件
     if [[ -d "$ssh_config_d" ]]; then
-        # 查找所有包含 PermitRootLogin 的 .conf 文件
         grep -l "PermitRootLogin" "$ssh_config_d"/*.conf 2>/dev/null | while read -r conf_file; do
             echo -e "${YELLOW}发现覆盖配置，正在修正：${conf_file}${NC}"
             $su sed -i -E "s/^#?PermitRootLogin.*/PermitRootLogin yes/" "$conf_file"
         done
 
-        # 查找所有包含 PasswordAuthentication 的 .conf 文件
         grep -l "PasswordAuthentication" "$ssh_config_d"/*.conf 2>/dev/null | while read -r conf_file; do
              echo -e "${YELLOW}发现覆盖配置，正在修正：${conf_file}${NC}"
             $su sed -i -E "s/^#?PasswordAuthentication.*/PasswordAuthentication yes/" "$conf_file"
@@ -238,13 +232,9 @@ root_pwd() {
     
     # --- 3. 最终生效验证 ---
     echo -e "${BLUE}===== SSH 最终生效策略验证 =====${NC}"
-    echo "正在运行 sshd -T 检查最终加载的配置..."
-    # 检查 sshd 是否存在
     if command -v sshd >/dev/null 2>&1; then
-        # 使用 sshd -T 获取实际生效的配置
         local effective_config
         effective_config=$($su sshd -T 2>/dev/null | grep -E "^(permitrootlogin|passwordauthentication)")
-        
         echo -e "${YELLOW}${effective_config}${NC}"
         
         if echo "$effective_config" | grep -q "permitrootlogin yes"; then
@@ -275,12 +265,8 @@ ssh_port() {
     [[ $EUID -ne 0 ]] && su='sudo'
 
     $su cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-
-    # 修改端口，同样使用 -E 增强兼容性
     $su sed -i -E "s/^#?Port .*/Port $por/" /etc/ssh/sshd_config
     
-    # 确保没有其他 Port 行干扰（删除除第一行外的其他 Port 配置? 比较复杂，这里简单处理）
-    # 如果原文件没有 Port 配置，追加
     if ! grep -q "^Port" /etc/ssh/sshd_config; then
          echo "Port $por" | $su tee -a /etc/ssh/sshd_config >/dev/null
     fi
@@ -304,12 +290,9 @@ ssh_key() {
     [[ -z "$ssh_key" ]] && { echo -e "${RED}公钥不能为空${NC}"; return 1; }
 
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-
-    # 公钥认证开启
     sed -i 's/^#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
     sed -i 's/^PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 
-    # 选择是否保留密码登录
     read -p "是否保留密码登录？[y/N]：" enable_password
     if [[ "$enable_password" =~ ^[Yy]$ ]]; then
         sed -i -E 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
@@ -327,7 +310,6 @@ ssh_key() {
     chmod 600 /root/.ssh/authorized_keys
 
     log "root SSH 公钥已配置（保留密码：$enable_password）"
-
     restart_ssh_service
     echo -e "${GREEN}${MSG}${NC}"
 }
@@ -337,7 +319,6 @@ ssh_key() {
 # =========================================================
 user_ssh_key() {
     current_user=$(whoami)
-
     echo -e "${BLUE}===== 配置普通用户 SSH 公钥 =====${NC}"
     confirm_action || return 1
 
@@ -345,13 +326,10 @@ user_ssh_key() {
     [[ -z "$ssh_key" ]] && { echo -e "${RED}公钥不能为空${NC}"; return 1; }
 
     read -p "是否保留密码登录？[y/N]：" enable_password
-
     su=''
     [[ $EUID -ne 0 ]] && su='sudo'
 
     $su cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-
-    # 启用公钥认证
     $su sed -i -E 's/^#?PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
 
     if [[ "$enable_password" =~ ^[Yy]$ ]]; then
@@ -369,7 +347,6 @@ user_ssh_key() {
     $su chown $current_user:$current_user /home/$current_user/.ssh -R
 
     log "用户 $current_user 公钥已配置"
-
     restart_ssh_service
     echo -e "${GREEN}${MSG}${NC}"
 }
@@ -380,28 +357,23 @@ user_ssh_key() {
 fire_install() {
     echo -e "${BLUE}===== 安装防火墙 =====${NC}"
     confirm_action || return 1
-
     su=''
     [[ $EUID -ne 0 ]] && su='sudo'
 
     if command -v apt >/dev/null 2>&1; then
         echo -e "${GREEN}检测到 Debian/Ubuntu 系统，将安装 UFW${NC}"
         log "选择安装 UFW"
-
         $su apt update
         $su apt install ufw -y
         $su ufw --force enable
-
         echo -e "${GREEN}UFW 安装完成并已启用${NC}"
 
     elif command -v yum >/dev/null 2>&1; then
         echo -e "${GREEN}检测到 RHEL/CentOS，将安装 firewalld${NC}"
         log "选择安装 Firewalld"
-
         $su yum install -y firewalld
         $su systemctl enable firewalld
         $su systemctl start firewalld
-
         echo -e "${GREEN}Firewalld 安装完成并已启动${NC}"
 
     else
@@ -412,42 +384,28 @@ fire_install() {
 }
 
 # =========================================================
-# 6. 批量或单个方式选择
+# 6. 配置防火墙端口 (辅助函数)
 # =========================================================
 choose_port_mode() {
     echo -e "${BLUE}请选择端口输入方式${NC}"
     echo -e "${GREEN}1. 单个端口模式${NC}"
     echo -e "${GREEN}2. 批量端口模式（空格或逗号分隔）${NC}"
     read -p "请选择 [1-2]: " mode
-
     case "$mode" in
-        1)
-            read -p "请输入端口号（如 80 或 443/tcp）： " PORT_INPUT
-            ;;
-        2)
-            read -p "请输入多个端口号（空格/逗号分隔）： " PORT_INPUT
-            ;;
-        *)
-            echo -e "${RED}无效选择${NC}"
-            return 1
-            ;;
+        1) read -p "请输入端口号（如 80 或 443/tcp）： " PORT_INPUT ;;
+        2) read -p "请输入多个端口号（空格/逗号分隔）： " PORT_INPUT ;;
+        *) echo -e "${RED}无效选择${NC}"; return 1 ;;
     esac
 }
 
-# =========================================================
-# 解析端口：自动判断协议与格式
-# =========================================================
 parse_ports() {
     local raw_list="$1"
     local cleaned=$(echo "$raw_list" | tr ',' ' ' | tr -s ' ')
-
     PORTS_AND_PROTOS=()
-
     for item in $cleaned; do
         if [[ "$item" =~ ^([0-9]+)(/(tcp|udp))?$ ]]; then
             port=${BASH_REMATCH[1]}
             proto=${BASH_REMATCH[3]}
-
             if [[ -n "$proto" ]]; then
                 PORTS_AND_PROTOS+=("${port}/${proto}")
             else
@@ -456,7 +414,6 @@ parse_ports() {
                 echo -e "  ${GREEN}2. UDP${NC}"
                 echo -e "  ${GREEN}3. TCP + UDP${NC}"
                 read -p "请选择协议 [1-3]: " opt
-
                 case "$opt" in
                     1) PORTS_AND_PROTOS+=("${port}/tcp") ;;
                     2) PORTS_AND_PROTOS+=("${port}/udp") ;;
@@ -464,20 +421,15 @@ parse_ports() {
                     *) echo -e "${RED}无效选择，跳过 ${port}${NC}" ;;
                 esac
             fi
-
         else
             echo -e "${RED}格式无效：$item，已跳过${NC}"
         fi
     done
 }
 
-# =========================================================
-# FROM 来源 IP 选择
-# =========================================================
 choose_from_source() {
     echo
     read -p "是否设置来源 IP (FROM)？[y/N]：" enable_from
-
     if [[ "$enable_from" =~ ^[Yy]$ ]]; then
         read -p "请输入来源 IP 或网段 (如 192.168.1.0/24)： " FROM_IP
         [[ -z "$FROM_IP" ]] && FROM_IP="Anywhere"
@@ -486,35 +438,17 @@ choose_from_source() {
     fi
 }
 
-# =========================================================
-# 自动识别 UFW 或 Firewalld
-# =========================================================
 detect_firewall() {
-    if command -v ufw >/dev/null 2>&1; then
-        FIREWALL_CMD="ufw"
-    elif command -v firewall-cmd >/dev/null 2>&1; then
-        FIREWALL_CMD="firewalld"
-    else
-        FIREWALL_CMD=""
-    fi
+    if command -v ufw >/dev/null 2>&1; then FIREWALL_CMD="ufw";
+    elif command -v firewall-cmd >/dev/null 2>&1; then FIREWALL_CMD="firewalld";
+    else FIREWALL_CMD=""; fi
 }
 
-# =========================================================
-# 批量操作（开放 / 关闭）
-# =========================================================
 fire_batch_operation() {
     local operation=$1
     local op_zh=$([[ "$operation" == "open" ]] && echo "开放" || echo "关闭")
-
     detect_firewall
-
-    # 如果是关闭端口操作，并且系统使用 UFW，则先展示当前防火墙状态
-    if [[ "$operation" == "close" && "$FIREWALL_CMD" == "ufw" ]]; then
-        echo -e "${YELLOW}关闭端口前，当前 UFW 状态如下：${NC}"
-        sudo ufw status
-        echo
-    fi
-
+    [[ "$operation" == "close" && "$FIREWALL_CMD" == "ufw" ]] && { echo -e "${YELLOW}当前 UFW 状态：${NC}"; sudo ufw status; echo; }
     [[ -z "$FIREWALL_CMD" ]] && { echo -e "${RED}未检测到已安装的防火墙！${NC}"; return 1; }
 
     choose_port_mode || return 1
@@ -523,21 +457,15 @@ fire_batch_operation() {
 
     echo -e "${BLUE}开始 ${op_zh} 端口：${PORTS_AND_PROTOS[*]}，FROM=${FROM_IP}${NC}"
     confirm_action || return 1
-
     su=''
     [[ $EUID -ne 0 ]] && su='sudo'
 
     for pp in "${PORTS_AND_PROTOS[@]}"; do
         port=$(echo "$pp" | cut -d/ -f1)
         proto=$(echo "$pp" | cut -d/ -f2)
-
         echo -n "处理 $pp..."
 
-        # =====================================================
-        # firewalld
-        # =====================================================
         if [[ "$FIREWALL_CMD" == "firewalld" ]]; then
-
             if [[ "$operation" == "open" ]]; then
                 if [[ "$FROM_IP" == "Anywhere" ]]; then
                     $su firewall-cmd --permanent --add-port="${pp}" >/dev/null
@@ -548,12 +476,7 @@ fire_batch_operation() {
             else
                 $su firewall-cmd --permanent --remove-port="${pp}" >/dev/null 2>&1
             fi
-
-        # =====================================================
-        # UFW
-        # =====================================================
         elif [[ "$FIREWALL_CMD" == "ufw" ]]; then
-
             if [[ "$operation" == "open" ]]; then
                 if [[ "$FROM_IP" == "Anywhere" ]]; then
                     $su ufw allow "${pp}" >/dev/null
@@ -564,32 +487,21 @@ fire_batch_operation() {
                 $su ufw delete allow "${pp}" >/dev/null 2>&1
             fi
         fi
-
         echo -e "${GREEN}完成${NC}"
         log "端口操作: $pp, FROM=$FROM_IP, op=$operation"
     done
 
-    # reload firewall
     [[ "$FIREWALL_CMD" == "firewalld" ]] && $su firewall-cmd --reload
     [[ "$FIREWALL_CMD" == "ufw" ]] && $su ufw reload
-
     echo -e "${GREEN}防火墙规则已更新${NC}"
-
-    if [[ "$FIREWALL_CMD" == "ufw" ]]; then
-        echo -e "${YELLOW}当前 UFW 防火墙规则：${NC}"
-        $su ufw status
-    fi
+    [[ "$FIREWALL_CMD" == "ufw" ]] && { echo -e "${YELLOW}当前 UFW 规则：${NC}"; $su ufw status; }
 }
 
-# =========================================================
-# 防火墙菜单入口
-# =========================================================
 fire_set() {
     echo -e "${BLUE}===== 防火墙端口设置 =====${NC}"
     echo -e "${GREEN}1. 开放端口${NC}"
     echo -e "${GREEN}2. 关闭端口${NC}"
     read -p "请选择 [1-2]：" choice
-
     case "$choice" in
         1) fire_batch_operation "open" ;;
         2) fire_batch_operation "close" ;;
@@ -608,7 +520,6 @@ F2b_install() {
 
     read -p "请输入 SSH 端口号（默认 22）: " fshp
     [[ -z "$fshp" ]] && fshp=22
-
     read -p "请输入 IP 封禁时间 (秒，-1 为永久封禁): " ban_time
     [[ -z "$ban_time" ]] && ban_time=600
 
@@ -637,7 +548,6 @@ F2b_install() {
     fi
 
     $su mkdir -p /etc/fail2ban
-
     $su tee /etc/fail2ban/jail.local > /dev/null <<EOF
 [DEFAULT]
 bantime = $ban_time
@@ -654,7 +564,6 @@ EOF
 
     $su systemctl restart fail2ban
     $su systemctl enable fail2ban
-
     echo -e "${GREEN}Fail2ban 已启动${NC}"
     log "Fail2ban 已成功安装并运行"
 }
@@ -664,37 +573,29 @@ EOF
 # =========================================================
 set_swap() {
     echo -e "${BLUE}===== Swap 管理 =====${NC}"
-
     echo -e "${GREEN}1. 创建或修改 Swap${NC}"
     echo -e "${GREEN}2. 删除 Swap${NC}"
     read -p "请选择操作 [1-2]: " swap_choice
-
     [[ $EUID -ne 0 ]] && { echo -e "${RED}请使用 root 权限运行${NC}"; return 1; }
 
     DEFAULT_SWAP_FILE="/swapfile"
 
     if [[ "$swap_choice" == "1" ]]; then
         confirm_action || return 1
-
         read -p "请输入 Swap 大小 (GB，默认 2)： " SWAP_SIZE
         [[ -z "$SWAP_SIZE" ]] && SWAP_SIZE=2
-
         read -p "Swap 文件路径（默认 $DEFAULT_SWAP_FILE）： " SWAP_FILE
         [[ -z "$SWAP_FILE" ]] && SWAP_FILE=$DEFAULT_SWAP_FILE
-
         read -p "优先级 (默认 0)： " SWAP_PRIORITY
         [[ -z "$SWAP_PRIORITY" ]] && SWAP_PRIORITY=0
-
         read -p "是否开机自动挂载？[Y/n]：" auto_mount
         [[ "$auto_mount" =~ ^[Nn]$ ]] && AUTO=false || AUTO=true
 
-        log "创建/修改 Swap: size=${SWAP_SIZE}G, file=$SWAP_FILE, pri=$SWAP_PRIORITY"
+        log "创建/修改 Swap: size=${SWAP_SIZE}G, file=$SWAP_FILE"
 
-        if swapon --show | grep -q "$SWAP_FILE"; then
-            swapoff "$SWAP_FILE"
-        fi
+        if swapon --show | grep -q "$SWAP_FILE"; then swapoff "$SWAP_FILE"; fi
 
-        fallocate -l "${SWAP_SIZE}G" "$SWAP_FILE" 2>/dev/null ||
+        fallocate -l "${SWAP_SIZE}G" "$SWAP_FILE" 2>/dev/null || \
             dd if=/dev/zero of="$SWAP_FILE" bs=1G count="${SWAP_SIZE}" oflag=append conv=notrunc
 
         chmod 600 "$SWAP_FILE"
@@ -710,27 +611,19 @@ set_swap() {
         fi
 
         echo -e "${GREEN}Swap 已成功创建或修改${NC}"
-        log "Swap 创建/修改成功"
         free -h
-        swapon --show
 
     elif [[ "$swap_choice" == "2" ]]; then
         confirm_action || return 1
-
         read -p "请输入 Swap 路径（默认 $DEFAULT_SWAP_FILE）： " SWAP_PATH
         [[ -z "$SWAP_PATH" ]] && SWAP_PATH=$DEFAULT_SWAP_FILE
 
-        if swapon --show | grep -q "$SWAP_PATH"; then
-            swapoff "$SWAP_PATH"
-        fi
-
+        if swapon --show | grep -q "$SWAP_PATH"; then swapoff "$SWAP_PATH"; fi
         sed -i "\|$SWAP_PATH|d" /etc/fstab
         [[ -f "$SWAP_PATH" ]] && rm -f "$SWAP_PATH"
-
         echo -e "${GREEN}Swap 已删除${NC}"
         log "Swap 删除成功"
         free -h
-        swapon --show
     else
         echo -e "${RED}无效选择${NC}"
     fi
@@ -742,31 +635,190 @@ set_swap() {
 register_rhel_system() {
     echo -e "${BLUE}===== RHEL 系统注册 =====${NC}"
     confirm_action || return 1
-
     if [[ ! -f /etc/redhat-release ]]; then
         echo -e "${RED}此系统不是 RHEL/CentOS 系列${NC}"
         return 1
     fi
-
     read -p "请输入 RedHat 用户名: " RHEL_USER
     read -p "请输入 RedHat 密码: " RHEL_PASS
-
     [[ -z "$RHEL_USER" || -z "$RHEL_PASS" ]] && { echo -e "${RED}不能为空${NC}"; return 1; }
 
     log "开始注册 RHEL 系统，用户：$RHEL_USER"
-
     if command -v subscription-manager >/dev/null 2>&1; then
         sudo subscription-manager register --username "$RHEL_USER" --password "$RHEL_PASS"
-        echo -e "${GREEN}注册成功（subscription-manager）${NC}"
+        echo -e "${GREEN}注册成功${NC}"
     elif command -v rhc >/dev/null 2>&1; then
         sudo rhc connect -u "$RHEL_USER" -p "$RHEL_PASS"
-        echo -e "${GREEN}注册成功（rhc connect）${NC}"
+        echo -e "${GREEN}注册成功${NC}"
     else
         echo -e "${RED}系统不支持 RHEL 注册工具${NC}"
         return 1
     fi
+}
 
-    log "RHEL 注册完成"
+# =========================================================
+# 11. 切换/修复默认网关 (Metric 优先级模式)
+# =========================================================
+gateway_manager() {
+    echo -e "${BLUE}===== 默认网关快速切换 (优先级模式) =====${NC}"
+    
+    # --- 1. 自动检测并询问安装依赖 (ifmetric) ---
+    if ! command -v ifmetric >/dev/null 2>&1; then
+        echo -e "${YELLOW}检测到未安装 ifmetric 工具（用于无缝切换网关）。${NC}"
+        read -p "是否立即安装该工具？[y/N]: " install_confirm
+        
+        # 如果用户输入的不是 y 或 Y，则停止
+        if [[ ! "$install_confirm" =~ ^[Yy]$ ]]; then
+            echo -e "${RED}已取消安装。无法使用此功能，返回菜单。${NC}"
+            return 1
+        fi
+
+        echo -e "${GREEN}正在安装 ifmetric...${NC}"
+        su=''
+        [[ $EUID -ne 0 ]] && su='sudo'
+        
+        if command -v apt >/dev/null 2>&1; then
+            # Debian/Ubuntu
+            $su apt update -y >/dev/null 2>&1
+            $su apt install ifmetric -y
+        elif command -v yum >/dev/null 2>&1; then
+            # CentOS/RHEL
+            echo -e "${YELLOW}尝试安装 EPEL 源...${NC}"
+            $su yum install epel-release -y >/dev/null 2>&1
+            $su yum install ifmetric -y
+        else
+            echo -e "${RED}无法识别系统包管理器，请手动安装 ifmetric！${NC}"
+            return 1
+        fi
+        
+        # 再次检查是否安装成功
+        if ! command -v ifmetric >/dev/null 2>&1; then
+             echo -e "${RED}安装失败，请尝试手动运行安装命令。${NC}"
+             return 1
+        else
+             echo -e "${GREEN}ifmetric 安装成功！${NC}"
+             sleep 1
+        fi
+    fi
+
+    # --- 2. 显示当前状态 ---
+    echo -e "${YELLOW}当前网关状态 (Metric越小越优先):${NC}"
+    ip route show | grep default
+    echo -e "${BLUE}---------------------------------${NC}"
+    
+    # --- 3. 自动获取网卡列表 ---
+    echo -e "检测到以下网卡连接着网关："
+    interfaces=$(ip route show | grep default | awk '{print $5}' | sort | uniq)
+    
+    i=1
+    declare -a net_array
+    for iface in $interfaces; do
+        echo -e "${GREEN}${i}. 设置 ${iface} 为主网关${NC}"
+        net_array[$i]=$iface
+        let i++
+    done
+    echo -e "${GREEN}${i}. 返回上级菜单${NC}"
+
+    read -p "请选择切换目标 [1-$((i-1))]: " choice
+
+    # --- 4. 检查输入并执行切换 ---
+    target_dev=${net_array[$choice]}
+    
+    if [[ -z "$target_dev" ]]; then
+        if [[ "$choice" == "$i" ]]; then return 0; fi
+        echo -e "${RED}无效选择${NC}"
+        return 1
+    fi
+
+    echo -e "${YELLOW}正在将 $target_dev 设为主网关 (Metric=0)...${NC}"
+    confirm_action || return 1
+    
+    su=''
+    [[ $EUID -ne 0 ]] && su='sudo'
+
+    # 核心逻辑：不删除路由，只修改优先级
+    # A. 先把所有网卡的优先级降到最低 (2000)
+    for iface in $interfaces; do
+        $su ifmetric "$iface" 2000
+    done
+
+    # B. 把目标网卡的优先级提顺到最高 (0)
+    $su ifmetric "$target_dev" 0
+
+    echo -e "${GREEN}✔ 切换完成！${NC}"
+    echo -e "${YELLOW}当前路由表：${NC}"
+    ip route show | grep default
+}
+
+# =========================================================
+# 12. 设置快捷启动键（纯手动模式 + 自动执行配置）
+# =========================================================
+set_shortcut() {
+    echo -e "${BLUE}===== 设置启动快捷键 (手动模式) =====${NC}"
+    
+    # 1. 确定 Shell 配置文件
+    shell_config="$HOME/.bashrc"
+    if [[ "$SHELL" =~ "zsh" ]]; then
+        shell_config="$HOME/.zshrc"
+    fi
+    echo -e "配置文件: ${YELLOW}$shell_config${NC}"
+
+    # 2. 输入快捷键名称
+    echo
+    read -p "1. 请输入快捷键名称 (例如 k): " key_name
+    if [[ -z "$key_name" ]]; then
+        echo -e "${RED}快捷键不能为空！${NC}"; return 1
+    fi
+
+    # 3. 手动输入具体命令或路径
+    echo -e "\n2. 请输入要执行的【完整命令】或【脚本绝对路径】"
+    echo -e "   ${YELLOW}(例如: /root/myscript.sh 或 python3 /opt/run.py)${NC}"
+    read -p "   请输入: " manual_path
+    
+    if [[ -z "$manual_path" ]]; then
+        echo -e "${RED}路径不能为空！${NC}"; return 1
+    fi
+
+    # 4. 选择是否添加 sudo bash
+    echo -e "\n3. 是否自动添加 'sudo bash' 前缀？"
+    echo -e "   y = 最终执行: sudo bash $manual_path"
+    echo -e "   n = 最终执行: $manual_path (原样执行)"
+    read -p "   请选择 [y/N]: " add_prefix
+
+    if [[ "$add_prefix" =~ ^[Yy]$ ]]; then
+        final_cmd="sudo bash $manual_path"
+    else
+        final_cmd="$manual_path"
+    fi
+
+    # 5. 写入配置 (先删后加，防止重复)
+    if grep -q "alias $key_name=" "$shell_config"; then
+        sed -i "/alias $key_name=/d" "$shell_config"
+        echo -e "${YELLOW}已覆盖旧的快捷键 '$key_name'${NC}"
+    fi
+
+    echo "alias $key_name='$final_cmd'" >> "$shell_config"
+    log "设置快捷键: $key_name -> $final_cmd"
+
+    echo -e "${GREEN}设置成功！${NC}"
+    echo -e "快捷键: ${YELLOW}$key_name${NC}"
+    echo -e "执行:   ${YELLOW}$final_cmd${NC}"
+    echo -e "-------------------------------------"
+    
+    # 6. 自动生效逻辑 (使用 exec 重启 Shell)
+    echo -e "${YELLOW}为了让快捷键立即生效，需要重启 Shell (这将退出当前脚本)。${NC}"
+    read -p "是否立即重启 Shell？[y/N]: " reload_choice
+
+    if [[ "$reload_choice" =~ ^[Yy]$ ]]; then
+        echo -e "${GREEN}正在重新加载 Shell 环境...${NC}"
+        # 使用 login shell 参数 (-l) 确保 .bashrc/.profile 被完整加载
+        # 获取当前 Shell 程序的名称 (bash, zsh 等)
+        current_shell=$(ps -p $$ -o comm=)
+        exec "$current_shell"
+    else
+        echo -e "${YELLOW}请记得手动执行以下命令使配置生效：${NC}"
+        echo -e "${GREEN}source $shell_config${NC}"
+    fi
 }
 
 # =========================================================
@@ -786,13 +838,15 @@ while true; do
         8) set_swap ;;
         9) register_rhel_system ;;
         10) restart_all_interfaces ;;
-        11)
+        11) gateway_manager ;;  # 新增的调用
+        12) set_shortcut ;;
+        13)
             echo -e "${GREEN}已退出脚本，再见！${NC}"
             log "用户退出脚本"
             exit 0
             ;;
         *)
-            echo -e "${RED}无效选择，请输入 1-11${NC}"
+            echo -e "${RED}无效选择，请输入 1-12${NC}"
             ;;
     esac
 
