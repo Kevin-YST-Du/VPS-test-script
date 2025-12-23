@@ -22,6 +22,22 @@ export LC_ALL=C
 # 不要漏了最后的 $PATH，否则会找不到 windows 系统程序例如 diskpart
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 
+# 如果不是 bash 的话，继续执行会有语法错误，因此在这里判断是否 bash
+if [ -z "$BASH" ]; then
+    if [ -f /etc/alpine-release ]; then
+        if ! apk add bash; then
+            echo "Error while install bash." >&2
+            exit 1
+        fi
+    fi
+    if command -v bash >/dev/null; then
+        exec bash "$0" "$@"
+    else
+        echo "Please run this script with bash." >&2
+        exit 1
+    fi
+fi
+
 # 记录日志，过滤含有 password 的行
 exec > >(tee >(grep -iv password >>/reinstall.log)) 2>&1
 THIS_SCRIPT=$(readlink -f "$0")
@@ -34,11 +50,6 @@ trap_err() {
     error "Line $line_no return $ret_no"
     sed -n "$line_no"p "$THIS_SCRIPT"
 }
-
-if ! { [ -n "$BASH" ] && [ -n "$BASH_VERSION" ]; }; then
-    echo "Please run this script with bash." >&2
-    exit 1
-fi
 
 usage_and_exit() {
     if is_in_windows; then
@@ -53,10 +64,11 @@ Usage: $reinstall_____ anolis      7|8|23
                        oracle      8|9|10
                        almalinux   8|9|10
                        centos      9|10
+                       fnos        1
+                       nixos       25.11
                        fedora      42|43
-                       nixos       25.05
                        debian      9|10|11|12|13
-                       alpine      3.19|3.20|3.21|3.22
+                       alpine      3.20|3.21|3.22|3.23
                        opensuse    15.6|16.0|tumbleweed
                        openeuler   20.03|22.03|24.03|25.09
                        ubuntu      16.04|18.04|20.04|22.04|24.04|25.10 [--minimal]
@@ -64,7 +76,6 @@ Usage: $reinstall_____ anolis      7|8|23
                        arch
                        gentoo
                        aosc
-                       fnos
                        redhat      --img="http://access.cdn.redhat.com/xxx.qcow2"
                        dd          --img="http://xxx.com/yyy.zzz" (raw image stores in raw/vhd/tar/gz/xz/zst)
                        windows     --image-name="windows xxx yyy" --lang=xx-yy
@@ -909,7 +920,7 @@ get_windows_iso_link() {
                     esac
                     ;;
                 homebasic | homepremium | ultimate) echo _ ;;
-                business | enterprise) "$edition" ;;
+                business | enterprise) echo "$edition" ;;
                 esac
                 ;;
             7)
@@ -1487,8 +1498,8 @@ Continue?
             dir=distribution/leap/$releasever/appliances
             case "$releasever" in
             15.6) file=openSUSE-Leap-$releasever-Minimal-VM.$basearch-Cloud.qcow2 ;;
-            # 16.0) file=Leap-$releasever-Minimal-VM.$basearch-Cloud.qcow2 ;; # 缺少 openSUSE-repos-Leap 包，导致没有源
-            16.0) file=Leap-$releasever-Minimal-VM.$basearch-kvm$(if [ "$basearch" = x86_64 ]; then echo '-and-xen'; fi).qcow2 ;;
+            16.0) file=Leap-$releasever-Minimal-VM.$basearch-Cloud.qcow2 ;;
+            # 16.0) file=Leap-$releasever-Minimal-VM.$basearch-kvm$(if [ "$basearch" = x86_64 ]; then echo '-and-xen'; fi).qcow2 ;;
             esac
 
             # https://src.opensuse.org/openSUSE/Leap-Images/src/branch/leap-16.0/kiwi-templates-Minimal/Minimal.kiwi
@@ -1907,11 +1918,12 @@ verify_os_name() {
         'almalinux   8|9|10' \
         'rocky       8|9|10' \
         'oracle      8|9|10' \
+        'fnos        1' \
         'fedora      42|43' \
-        'nixos       25.05' \
+        'nixos       25.11' \
         'debian      9|10|11|12|13' \
         'opensuse    15.6|16.0|tumbleweed' \
-        'alpine      3.19|3.20|3.21|3.22' \
+        'alpine      3.20|3.21|3.22|3.23' \
         'openeuler   20.03|22.03|24.03|25.09' \
         'ubuntu      16.04|18.04|20.04|22.04|24.04|25.10' \
         'redhat' \
@@ -1919,7 +1931,6 @@ verify_os_name() {
         'arch' \
         'gentoo' \
         'aosc' \
-        'fnos' \
         'windows' \
         'dd' \
         'netboot.xyz'; do

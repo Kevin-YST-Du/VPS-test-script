@@ -5023,7 +5023,7 @@ EOF
       echo -e "${white} 1. F佬Sing-box一键脚本        5. 老王xray-2go一键脚本${re}"
       echo -e "${white} 2. 老王Sing-box四合一         6. F佬ArgoX一键脚本${re}"
       echo -e "${white} 3. 勇哥Sing-box四合一         7. Suoha一键Argo脚本${re}"
-      echo -e "${white} 4. 233boy.sing-box一键脚本    8. 老王Argo+哪吒${re}"
+      echo -e "${white} 4. 233boy.sing-box一键脚本    8. 老王小钢炮(可挂哪吒)${re}"
       echo -e "${yellow}---------------------------------------------------------${re}"
       echo -e "${yellow}        单协议                    XRAY面板及其他${re}"
       echo -e "${yellow}---------------------------------------------------------${re}"
@@ -5077,59 +5077,34 @@ EOF
         ;; 
         8)
         clear
-            install wget
+            install wget bash
             clear
 
-            # 创建argox目录并设置权限
-            mkdir -p "argox" && chmod -R 777 "argox" > /dev/null 2>&1 && cd "argox" > /dev/null 2>&1
-
-            # 获取系统架构
-            ARCH=$(uname -m)
-            
-            # 定义哪吒探针变量（默认为空）
-            NEZHA_SERVER=""
-            NEZHA_PORT=""
-            NEZHA_KEY=""
-            # 判断是否需要安装哪吒探针
             read -p $'\033[1;33m是否需要安装哪吒探针？(y/n) 【直接回车不安装】: \033[0m' nezha
             
             if [ "$nezha" == "y" ] || [ "$nezha" == "Y" ]; then
-                # 提示输入哪吒域名
-                read -p $'\033[1;35m请输入哪吒客户端的域名: \033[0m' nezha_server
-            
-                # 提示输入哪吒端口
-                read -p $'\033[1;35m请输入哪吒端口: \033[0m' nezha_port
-            
-                # 提示输入哪吒密钥
-                read -p $'\033[1;35m请输入哪吒客户端密钥: \033[0m' nezha_key
+                read -p $'\033[1;35m请输入哪吒客域名(v1格式: nezha.xxx.com:8008  v0格式: nezha.xxx.com): \033[0m' nzserver
+                read -p $'\033[1;35m请输入哪吒agent端口(哪吒v1请直接回车留空): \033[0m' nzport
+                read -p $'\033[1;35m请输入哪吒agnt密钥: \033[0m' nzkey
             fi
-            
-            # 根据架构下载并运行不同的程序
-            case $ARCH in
-                "aarch64" | "arm64"| "arm")
-                    wget https://arm64.ssss.nyc.mn/argox -O argox
-                    ;;
-                "x86_64" | "amd64"| "x86")
-                    wget https://amd64.ssss.nyc.mn/argox -O argox
-                    ;;
-                *)
-                    echo "Unsupported architecture: $ARCH"
-                    exit 1
-                    ;;
-            esac
-            
-            if [ -f "argox" ]; then
-                chmod +x argox
-                if [ -n "$nezha_server" ] && [ -n "$nezha_port" ] && [ -n "$nezha_key" ]; then
-                    NEZHA_SERVER=$nezha_server NEZHA_PORT=$nezha_port NEZHA_KEY=$nezha_key ./argox
-                else
-                    ./argox
-                fi
-            else
-                echo "Failed to download the binary for architecture: $ARCH"
-                exit 1
+            read -p $'\033[1;33m是否需要使用固定隧道？(直接回车将使用临时隧道 y/n) : \033[0m' isargo
+            if [ "$isargo" == "y" ] || [ "$isargo" == "Y" ]; then
+                read -p $'\033[1;35m请输入固定隧道的域名(格式: xxx.xxx.com): \033[0m' argodomain
+                read -p $'\033[1;35m请输入固定隧道密钥(json或token): \033[0m' argokey
             fi
-            echo -e "${green}\n安装完成，复制以上节点粘贴到v2rayN中导入；${red}删除root目录下的argox文件夹重启服务器即可卸载！${re}"
+
+            read -p $'\033[1;33m是否需要直连协议(hy2,tuic,reality,anytls,socks5,anyReality等,直接回车不启用)？(y/n) : \033[0m' isdirect
+            if [ "$isdirect" == "y" ] || [ "$isdirect" == "Y" ]; then
+                read -p $'\033[1;35m请输入Hy2节点端口(不需要可直接回车留空): \033[0m' hy2pt
+                read -p $'\033[1;35m请输入Tuic节点端口(不需要可直接回车留空): \033[0m' tuicpt
+                read -p $'\033[1;35m请输入Reality节点端口(不需要可直接回车留空): \033[0m' realitypt
+                read -p $'\033[1;35m请输入Anytls节点端口(不需要可直接回车留空): \033[0m' anytlspt
+                read -p $'\033[1;35m请输入Socks5节点端口(不需要可直接回车留空): \033[0m' socks5pt
+                read -p $'\033[1;35m请输入AnyReality节点端口(不需要可直接回车留空): \033[0m' anyrealitypt
+            fi
+            read -p $'\033[1;35m请输入你的UUID(留空将随机生成,哪吒v1将依赖此uuid): \033[0m' uuid
+            [[ -z $uuid ]] && uuid=$(cat /proc/sys/kernel/random/uuid)
+            UUID=$uuid NEZHA_SERVER=$nzserver NEZHA_PORT=$nzport NEZHA_KEY=$nzkey ARGO_DOMAIN=$argodomain ARGO_AUTH=$argokey HY2_PORT=$hy2pt TUIC_PORT=$tuicpt REALITY_PORT=$realitypt ANYTLS_PORT=$anytlspt S5_PORT=$socks5pt ANYREALITY_PORT=$anyrealitypt bash <(curl -Ls https://main.ssss.nyc.mn/sb.sh)
             sleep 1
             break_end
         ;;

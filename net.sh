@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2025-09-18"
+script_version="v2025-12-23"
 check_bash(){
 current_bash_version=$(bash --version|head -n 1|awk '{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+(\.[0-9]+)?/) print $i}')
 major_version=$(echo "$current_bash_version"|cut -d'.' -f1)
@@ -399,7 +399,7 @@ fi
 if ! command -v speedtest >/dev/null 2>&1;then
 is_speedtest=0
 fi
-if ! command -v stun >/dev/null 2>&1&&(command -v apk >/dev/null 2>&1||command -v yum >/dev/null 2>&1||command -v zypper >/dev/null 2>&1||command -v xbps-install >/dev/null 2>&1||command -v pacman >/dev/null 2>&1);then
+if ! command -v stun >/dev/null 2>&1&&(command -v apk >/dev/null 2>&1||command -v dnf >/dev/null 2>&1||command -v yum >/dev/null 2>&1||command -v zypper >/dev/null 2>&1||command -v xbps-install >/dev/null 2>&1||command -v pacman >/dev/null 2>&1);then
 is_stun=0
 fi
 if [[ $is_dep -eq 0 || $is_nexttrace -eq 0 || $is_speedtest -eq 0 ]];then
@@ -485,7 +485,7 @@ $usesudo $install_command jq curl imagemagick mtr-tiny iperf3 stun bc procps
 ;;
 dnf)$usesudo $install_command epel-release
 $usesudo $package_manager makecache
-$usesudo $install_command jq curl ImageMagick mtr iperf3 stun bc procps-ng
+$usesudo $install_command jq curl ImageMagick mtr iperf3 bc procps-ng libstdc++
 ;;
 yum)$usesudo $install_command epel-release
 $usesudo $package_manager makecache
@@ -2872,7 +2872,7 @@ bgp_updates+=".BGP |= map(. + { NeighborinTotal: null }) | "
 bgp_updates+=".BGP |= map(. + { NeighborActive: null }) | "
 fi
 local_updates+=".Local |= map(. + { NAT: \"${getnat[nat]:-null}\" }) | "
-local_updates+=".Local |= map(. + { NATDescribe: \"$(echo -e "${slocal[${getnat[type]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
+local_updates+=".Local |= map(. + { NATDescribe: \"$(echo -e "${slocal[${getnat[type]:-0}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
 local_updates+=".Local |= map(. + { Mapping: \"$(echo -e "${slocal[m${getnat[m]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
 local_updates+=".Local |= map(. + { Filter: \"$(echo -e "${slocal[f${getnat[f]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
 local_updates+=".Local |= map(. + { Port: \"$(echo -e "${slocal[p${getnat[p]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
