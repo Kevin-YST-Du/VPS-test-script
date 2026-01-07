@@ -5226,24 +5226,28 @@ EOF
 
         16)
         clear
-            install lsof
+            install iproute2
             clear
             read -p $'\033[1;35m请输入MTProto代理端口(直接回车则使用随机端口): \033[0m' port
-            
-             if [[ -z $port ]]; then
-                 port=$(shuf -i 2000-65000 -n 1)
-                 echo -e "${green}使用随机端口: $port${re}"
-             fi
-             
-             while [[ -n $(lsof -i :$port 2>/dev/null) ]]; do
-                 echo -e "${red}${port}端口已经被其他程序占用，请更换端口重试${re}"
-                 read -p $'\033[1;35m请输入MTProto代理端口(直接回车则使用随机端口): \033[0m' port
+            while true; do
+                if [[ -z $port ]]; then
+                    port=$(shuf -i 2000-65000 -n 1)
+                    echo -e "${green}使用随机端口: $port${re}"
+                fi
                 
-                 if [[ -z $port ]]; then
-                     port=$(shuf -i 2000-65000 -n 1)
-                     echo -e "${green}使用随机端口: $port${re}"
-                 fi
-             done
+                # 检查端口是否被占用
+                if [[ -n $(ss -tln | grep ":$port ") ]] || [[ -n $(lsof -i :$port 2>/dev/null) ]]; then
+                    if [[ $port == "$original_port" ]]; then
+                        echo -e "${red}${port}端口已经被其他程序占用，请更换端口重试${re}"
+                    else
+                        echo -e "${red}随机生成的端口 ${port} 已被占用，重新生成...${re}"
+                    fi
+                    port=""
+                    continue
+                else
+                    break
+                fi
+            done
             PORT=$port bash <(curl -Ls https://raw.githubusercontent.com/eooce/scripts/master/mtp.sh)
             sleep 1
             break_end
