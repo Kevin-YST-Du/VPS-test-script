@@ -1,262 +1,210 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-:: ==============================
-:: Git 快捷助手（优化修复版）
-:: ==============================
+:: ==========================================
+:: Git 快捷管理助手 v2.5 (最终整合版)
+:: ==========================================
 
-:: 设置 UTF-8 (若乱码请尝试改为 936 或在 CMD 属性设置字体为 Lucida Console/Consolas)
+:: 设置 UTF-8 编码
 chcp 65001 >nul
-title Git 管理助手 [优化版]
+title Git 快捷助手 v2.5
 color 0b
 
-:: ==========================================
-:: 环境自检
-:: ==========================================
+:: --- 环境自检 ---
 where git >nul 2>&1
 if errorlevel 1 (
-    echo [严重错误] 未检测到 git，请先安装并添加到 PATH 环境变量。
-    pause
-    exit /b
+    echo [严重错误] 未检测到 Git，请先安装并添加到 PATH。
+    pause & exit /b
 )
 
-:: 自动修复 core.quotepath (解决中文乱码)
-for /f "delims=" %%Q in ('git config --get core.quotepath 2^>nul') do set "qp=%%Q"
-if /i "!qp!"=="true" (
-    git config --global core.quotepath false
-    echo [系统] 已自动修复中文路径显示配置 (core.quotepath=false)
-)
+:: 自动修复中文路径乱码配置
+git config --global core.quotepath false
 
 :: ==============================
-:: 主循环入口
+:: 主菜单循环
 :: ==============================
 :MENU
 cls
-call :SET_NOW
+call :GET_NOW
 call :SHOW_REPO_INFO
 
 echo.
-echo ==========================================
-echo        Git 管理助手 (%now_time%)
-echo ==========================================
-echo.
-echo    [1] 拉取代码 (Pull)
-echo    [2] 推送代码 (Push)
-echo    [3] 查看状态 (Status)
+echo    [1] 状态查询 (Status)
+echo    [2] 拉取更新 (Pull / Rebase)
+echo    [3] 提交推送 (Add + Commit + Push)
+echo    [4] 一键同步 (Sync: Pull+Commit+Push)
+echo    [5] 清理工具 (Clean Untracked)
 echo    [0] 退出
 echo.
 echo ==========================================
 set "choice="
-set /p choice="请输入选项: "
+set /p choice="请输入选项 (0-5): "
 
-if "%choice%"=="1" goto STEP_PULL
-if "%choice%"=="2" goto STEP_PUSH
-if "%choice%"=="3" goto STEP_STATUS
+if "%choice%"=="1" goto STEP_STATUS
+if "%choice%"=="2" goto STEP_PULL
+if "%choice%"=="3" goto STEP_PUSH
+if "%choice%"=="4" goto STEP_SYNC
+if "%choice%"=="5" goto STEP_CLEAN
 if "%choice%"=="0" exit
 goto MENU
 
 :: ==============================
-:: 查看状态
+:: 1. 查看状态
 :: ==============================
 :STEP_STATUS
 cls
-echo.
-echo --- 当前仓库状态 ---
-echo.
+echo --- 当前工作区状态 ---
 git status
+echo.
+echo --- 最近 5 条提交记录 ---
+git log -n 5 --oneline --graph --decorate
 echo.
 pause
 goto MENU
 
 :: ==============================
-:: 拉取流程
+:: 2. 拉取流程
 :: ==============================
 :STEP_PULL
 cls
-echo.
 echo --- Pull 模式选择 ---
 echo  [1] 普通拉取 (git pull)
-echo  [2] Rebase 拉取 (推荐, 保持线性历史)
-echo  [3] 自动 Stash -^> Pull -^> Pop (防冲突)
+echo  [2] 变基拉取 (git pull --rebase) - 推荐
+echo  [3] 强力拉取 (Stash -> Pull -> Pop)
 echo  [0] 返回
 echo.
 set "pull_mode="
 set /p pull_mode="请选择: "
 
 if "%pull_mode%"=="1" (
-    echo. & echo --- 执行: git pull ---
+    echo 执行: git pull...
     git pull
     pause & goto MENU
 )
 if "%pull_mode%"=="2" (
-    echo. & echo --- 执行: git pull --rebase ---
+    echo 执行: git pull --rebase...
     git pull --rebase
     pause & goto MENU
 )
-if "%pull_mode%"=="3" goto PULL_STASH
-if "%pull_mode%"=="0" goto MENU
-goto STEP_PULL
-
-:PULL_STASH
-cls
-call :CHECK_CHANGES
-if not defined has_change (
-    echo [提示] 本地无改动，直接执行 pull...
+if "%pull_mode%"=="3" (
+    echo [系统] 暂存本地改动...
+    git stash push -u -m "AutoStash_%now_time%"
+    echo [系统] 执行拉取...
     git pull
+    echo [系统] 恢复本地改动...
+    git stash pop
     pause & goto MENU
 )
-
-echo [提示] 检测到本地改动，准备执行 Stash...
-git stash push -u -m "AutoStash_%date%_%time%"
-if errorlevel 1 (
-    echo [错误] Stash 失败，停止操作。
-    pause & goto MENU
-)
-
-echo. & echo --- 执行 Pull ---
-git pull
-if errorlevel 1 (
-    echo [错误] Pull 失败！您的改动仍在 Stash 列表中。
-    echo 请手动执行: git stash pop 并解决冲突。
-    pause & goto MENU
-)
-
-echo. & echo --- 恢复改动 (Pop) ---
-git stash pop
-pause & goto MENU
+goto MENU
 
 :: ==============================
-:: 推送流程
+:: 3. 推送流程 (含双重 Y 确认)
 :: ==============================
 :STEP_PUSH
 cls
 call :CHECK_CHANGES
 if not defined has_change (
-    echo.
-    echo [提示] 工作区干净，无文件需要提交。
-    echo 正在检查是否需要推送到远端...
+    echo [提示] 本地工作区无改动，直接进入推送阶段。
     goto PUSH_REMOTE_ONLY
 )
 
-echo.
-echo --- 待提交文件 ---
+echo --- 待提交改动 ---
 git status --short
 echo.
-echo ==========================================
-echo  [1] 批量提交 (所有改动)
-echo  [2] 逐个提交 (选择性提交)
-echo  [0] 返回
-echo ==========================================
-set "commit_mode="
-set /p commit_mode="请选择: "
-
-if "%commit_mode%"=="1" goto PUSH_BATCH
-if "%commit_mode%"=="2" goto PUSH_SINGLE
-if "%commit_mode%"=="0" goto MENU
-goto STEP_PUSH
-
-:: --- 批量提交 ---
-:PUSH_BATCH
-echo.
 set "msg="
-set /p msg="请输入提交备注 (回车默认: Auto Update): "
-if "!msg!"=="" set "msg=Auto Update"
+set /p msg="请输入提交备注 (回车默认: update): "
+if "!msg!"=="" set "msg=update %now_time%"
 
-echo. & echo --- 添加并提交 ---
 git add .
 git commit -m "!msg!"
 if errorlevel 1 (
     echo [错误] 提交失败。
     pause & goto MENU
 )
-goto PUSH_REMOTE_ONLY
 
-:: --- 逐个提交 (修复闪退的核心部分) ---
-:PUSH_SINGLE
-cls
-echo.
-echo --- 逐个提交模式 ---
-echo [提示] 输入 y 提交，n 跳过，q 退出提交阶段
-echo.
-
-:: 使用 tokens=1,* 解析状态和路径，避免空格问题
-for /f "tokens=1,*" %%A in ('git status --porcelain') do (
-    set "status_code=%%A"
-    set "file_path=%%B"
-    
-    :: 去除路径可能自带的双引号 (针对带空格文件名)
-    set "file_path=!file_path:"=!"
-    
-    :: 简单的重命名处理 (git status 输出: R  old -> new)
-    :: 如果路径里包含 -> ，这行代码比较简陋，建议针对复杂情况只用批量提交
-    echo.
-    echo [文件] !file_path!  (状态: !status_code!)
-    
-    set "confirm="
-    set /p confirm="是否提交? (y/n/q): "
-    
-    if /i "!confirm!"=="q" goto PUSH_REMOTE_ONLY
-    if /i "!confirm!"=="y" (
-        git add "!file_path!"
-        
-        set "s_msg="
-        set /p s_msg="  备注 (回车默认: update): "
-        if "!s_msg!"=="" set "s_msg=update: !file_path!"
-        
-        git commit -m "!s_msg!"
-    )
-)
-echo.
-echo [完成] 所有文件遍历完毕。
-goto PUSH_REMOTE_ONLY
-
-:: --- 推送至远端 ---
 :PUSH_REMOTE_ONLY
 echo.
-echo ==========================================
-echo  [1] 正常推送 (git push)
-echo  [2] 强制推送 (Force with lease - 安全强推)
-echo  [3] 强制推送 (Force - 危险!)
-echo  [0] 取消推送，返回菜单
-echo ==========================================
+echo --- 推送模式 ---
+echo  [1] 标准推送 (git push)
+echo  [2] 安全强推 (force-with-lease)
+echo  [3] 强制推送 (force) - 谨慎!
+echo  [0] 返回
+echo.
 set "pmode="
 set /p pmode="请选择: "
 
-if "%pmode%"=="0" goto MENU
-
-:: 自动获取当前分支名
-for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "curr_branch=%%B"
-:: 自动获取 upstream
-for /f "delims=" %%U in ('git rev-parse --abbrev-ref --symbolic-full-name @{u} 2^>nul') do set "upstream=%%U"
-
-set "push_args="
-if not defined upstream (
-    echo [提示] 当前分支无上游，将自动设置: -u origin !curr_branch!
-    set "push_args=-u origin !curr_branch!"
-)
-
 if "%pmode%"=="1" (
-    echo --- 正在推送 ---
-    git push !push_args!
+    git push
+    goto PUSH_RESULT
 )
-if "%pmode%"=="2" (
-    echo --- 正在安全强推 ---
-    git push --force-with-lease !push_args!
-)
-if "%pmode%"=="3" (
-    echo.
-    echo [警告] 危险操作！
-    pause
-    echo --- 正在强推 ---
-    git push --force !push_args!
-)
+if "%pmode%"=="2" set "P_CMD=--force-with-lease" & set "P_DESC=安全强推" & goto CONFIRM_FORCE
+if "%pmode%"=="3" set "P_CMD=--force" & set "P_DESC=强制推送" & goto CONFIRM_FORCE
+goto MENU
 
-if errorlevel 1 (
-    echo.
-    echo [失败] 推送遇到错误，请检查网络或冲突。
+:CONFIRM_FORCE
+cls
+color 0c
+echo ==========================================
+echo           警 告：准备执行 !P_DESC!
+echo ==========================================
+echo  分支: !cur_br!
+echo.
+set /p c1="[确认 1/2] 确定强推? (y/n): "
+if /i not "!c1!"=="y" ( color 0b & goto MENU )
+
+set /p c2="[确认 2/2] 再次按 Y 确认执行: "
+if /i not "!c2!"=="y" ( color 0b & goto MENU )
+
+echo [执行中] git push !P_CMD! ...
+git push !P_CMD!
+
+:PUSH_RESULT
+if %errorlevel% equ 0 (
+    echo. & echo [成功] 操作已完成。
 ) else (
-    echo.
-    echo [成功] 推送完成。
+    echo. & echo [失败] 推送遇到错误，请检查冲突或网络。
+)
+color 0b
+pause
+goto MENU
+
+:: ==============================
+:: 4. 一键同步
+:: ==============================
+:STEP_SYNC
+cls
+echo [1/3] 正在拉取远程更新 (Rebase)...
+git pull --rebase
+echo.
+echo [2/3] 正在自动提交本地改动...
+call :CHECK_CHANGES
+if defined has_change (
+    git add .
+    git commit -m "Quick Sync: %now_time%"
+) else (
+    echo (本地无改动，跳过提交)
+)
+echo.
+echo [3/3] 正在推送到远端...
+git push
+if %errorlevel% equ 0 (
+    echo. & echo [完成] 同步成功。
+) else (
+    echo. & echo [错误] 同步失败。
+)
+pause
+goto MENU
+
+:: ==============================
+:: 5. 清理工具
+:: ==============================
+:STEP_CLEAN
+cls
+echo [警告] 这将永久删除所有未被 Git 追踪的文件和文件夹。
+set /p c_confirm="确定清理吗? (y/n): "
+if /i "%c_confirm!"=="y" (
+    git clean -fd
+    echo [完成] 清理完毕。
 )
 pause
 goto MENU
@@ -264,28 +212,38 @@ goto MENU
 :: ==============================
 :: 工具函数区
 :: ==============================
-:SET_NOW
-set "now_date=%date:~0,10%"
+
+:GET_NOW
+:: 获取当前时间，格式化为 HH:mm:ss
 set "now_time=%time:~0,8%"
 set "now_time=%now_time: =0%"
 exit /b
 
 :SHOW_REPO_INFO
+:: 检查是否在仓库中
 git rev-parse --is-inside-work-tree >nul 2>&1
 if errorlevel 1 (
-    echo [错误] 当前目录不是 Git 仓库！
-    pause
-    exit
+    color 0c & echo [错误] 当前目录不是 Git 仓库！ & pause & exit
 )
+:: 获取分支名
 for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "cur_br=%%B"
-echo [信息] 仓库路径: %cd%
-echo [信息] 当前分支: !cur_br!
+:: 同步远程索引并检查差异
+git fetch --prune >nul 2>&1
+set "status_msg=已同步"
+for /f "tokens=1,2" %%i in ('git rev-list --left-right --count HEAD...@{u} 2^>nul') do (
+    set "status_msg=本地领先 %%i | 远程领先 %%j"
+)
+echo ==========================================
+echo    位置: %cd%
+echo    分支: !cur_br! (!status_msg!)
+echo ==========================================
 exit /b
 
 :CHECK_CHANGES
+:: 检查是否有未提交的改动
 set "has_change="
 for /f "delims=" %%S in ('git status --porcelain 2^>nul') do (
     set "has_change=1"
-    goto :eof
+    exit /b
 )
 exit /b
