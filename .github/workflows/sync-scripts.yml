@@ -43,23 +43,33 @@ jobs:
           curl -L https://raw.githubusercontent.com/xykt/NetQuality/main/net.sh -o net.sh
           chmod +x net.sh
 
-          # ip.sh（修正 raw 地址）
+          # ip.sh
           curl -L https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh -o ip.sh
           chmod +x ip.sh
 
           # 拉取推送.bat
           curl -L https://raw.githubusercontent.com/Kevin-YST-Du/VPS-test-script/main/拉取推送.bat -o 拉取推送.bat
           chmod +x 拉取推送.bat
+
       - name: Commit & push if changed
         run: |
-          if git diff --quiet; then
-            echo "No changes."
+          # 配置用户信息
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 防止中文文件名在 Git 中显示为八进制编码
+          git config --global core.quotepath false
+
+          # 将所有修改过的文件加入暂存区
+          git add .
+
+          # 检查暂存区是否有内容变化
+          # 如果没有变化，git diff --cached --quiet 会返回 0，执行 echo 并正常退出
+          # 如果有变化，则跳过 if 块，继续执行 commit 和 push
+          if git diff --cached --quiet; then
+            echo "No changes detected, skipping commit."
             exit 0
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add *.sh
-          git commit -m "chore: sync scripts"
+          git commit -m "chore: sync scripts $(date +'%Y-%m-%d %H:%M')"
           git push origin main
