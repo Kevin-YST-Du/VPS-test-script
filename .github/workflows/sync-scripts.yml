@@ -1,0 +1,62 @@
+name: Sync scripts
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 每天 UTC 03:00 自动同步
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download scripts
+        run: |
+          set -e
+
+          # ecs.sh
+          curl -L https://raw.githubusercontent.com/spiritLHLS/ecs/main/ecs.sh -o ecs.sh
+          chmod +x ecs.sh
+
+          # reinstall.sh
+          curl -L https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh -o reinstall.sh
+          chmod +x reinstall.sh
+
+          # ssh.sh（原名 ssh_tool.sh）
+          curl -L https://raw.githubusercontent.com/eooce/ssh_tool/main/ssh_tool.sh -o ssh.sh
+          chmod +x ssh.sh
+
+          # root.sh
+          curl -L https://raw.githubusercontent.com/Kevin-YST-Du/VPS-test-script/main/root.sh -o root.sh
+          chmod +x root.sh
+
+          # net.sh
+          curl -L https://raw.githubusercontent.com/xykt/NetQuality/main/net.sh -o net.sh
+          chmod +x net.sh
+
+          # ip.sh（修正 raw 地址）
+          curl -L https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh -o ip.sh
+          chmod +x ip.sh
+
+      - name: Commit & push if changed
+        run: |
+          if git diff --quiet; then
+            echo "No changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add *.sh
+          git commit -m "chore: sync scripts"
+          git push origin main
