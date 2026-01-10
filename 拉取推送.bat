@@ -2,12 +2,12 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 :: ==========================================
-:: Git 快捷管理助手 v2.5 (最终整合版)
+:: Git 快捷管理助手 v3.2 (稳定修复版)
 :: ==========================================
 
 :: 设置 UTF-8 编码
 chcp 65001 >nul
-title Git 快捷助手 v2.5
+title Git 快捷助手 v3.2
 color 0b
 
 :: --- 环境自检 ---
@@ -31,7 +31,8 @@ call :SHOW_REPO_INFO
 echo.
 echo    [1] 状态查询 (Status)
 echo    [2] 拉取更新 (Pull / Rebase)
-echo    [3] 提交推送 (Add + Commit + Push)
+:: --- 下面这一行彻底移除了特殊符号 & 和 () ---
+echo    [3] 提交推送 [Smart Commit + Push]  [更新!]
 echo    [4] 一键同步 (Sync: Pull+Commit+Push)
 echo    [5] 清理工具 (Clean Untracked)
 echo    [0] 退出
@@ -42,7 +43,7 @@ set /p choice="请输入选项 (0-5): "
 
 if "%choice%"=="1" goto STEP_STATUS
 if "%choice%"=="2" goto STEP_PULL
-if "%choice%"=="3" goto STEP_PUSH
+if "%choice%"=="3" goto STEP_PUSH_MENU
 if "%choice%"=="4" goto STEP_SYNC
 if "%choice%"=="5" goto STEP_CLEAN
 if "%choice%"=="0" exit
@@ -98,9 +99,9 @@ if "%pull_mode%"=="3" (
 goto MENU
 
 :: ==============================
-:: 3. 推送流程 (含双重 Y 确认)
+:: 3. 提交推送主菜单
 :: ==============================
-:STEP_PUSH
+:STEP_PUSH_MENU
 cls
 call :CHECK_CHANGES
 if not defined has_change (
@@ -108,11 +109,27 @@ if not defined has_change (
     goto PUSH_REMOTE_ONLY
 )
 
-echo --- 待提交改动 ---
+echo --- 提交模式选择 ---
+echo  [1] 打包提交 (所有文件使用同一个备注)
+echo  [2] 逐个提交 (依次询问每个文件并写备注)
+echo  [0] 返回
+echo.
+set "commit_mode="
+set /p commit_mode="请选择模式: "
+
+if "%commit_mode%"=="1" goto COMMIT_BULK
+if "%commit_mode%"=="2" goto COMMIT_INDIVIDUAL
+if "%commit_mode%"=="0" goto MENU
+goto STEP_PUSH_MENU
+
+:: --- 模式A: 打包提交 ---
+:COMMIT_BULK
+echo.
+echo --- 待提交文件 ---
 git status --short
 echo.
 set "msg="
-set /p msg="请输入提交备注 (回车默认: update): "
+set /p msg="请输入统一备注 (回车默认: update): "
 if "!msg!"=="" set "msg=update %now_time%"
 
 git add .
@@ -121,14 +138,71 @@ if errorlevel 1 (
     echo [错误] 提交失败。
     pause & goto MENU
 )
+goto PUSH_REMOTE_ONLY
 
+:: --- 模式B: 逐个提交 ---
+:COMMIT_INDIVIDUAL
+cls
+echo [进入逐个提交模式] 
+echo 按 'y' 提交并写备注，按 'n' 跳过，按 'q' 停止。
+echo ------------------------------------------------
+
+:: 将状态输出到临时文件
+git status --porcelain > "%temp%\git_status_temp.txt"
+
+for /f "tokens=1,*" %%A in (%temp%\git_status_temp.txt) do (
+    set "f_status=%%A"
+    set "f_name=%%B"
+    :: 去除文件名可能包含的双引号
+    set "f_name=!f_name:"=!"
+    
+    call :PROCESS_SINGLE_FILE "!f_status!" "!f_name!"
+    if defined EXIT_INDIVIDUAL_LOOP goto END_INDIVIDUAL_LOOP
+)
+
+:END_INDIVIDUAL_LOOP
+del "%temp%\git_status_temp.txt"
+set "EXIT_INDIVIDUAL_LOOP="
+echo.
+echo [逐个提交结束] 剩余未提交文件将保留在工作区。
+goto PUSH_REMOTE_ONLY
+
+:: --- 处理单个文件的子程序 ---
+:PROCESS_SINGLE_FILE
+set "p_status=%~1"
+set "p_name=%~2"
+
+echo.
+echo 当前文件: [%p_status%] %p_name%
+set "ans="
+set /p ans="是否提交此文件? (y/n/q): "
+
+if /i "!ans!"=="q" (
+    set "EXIT_INDIVIDUAL_LOOP=1"
+    exit /b
+)
+
+if /i "!ans!"=="y" (
+    set "s_msg="
+    set /p s_msg="请输入 [%p_name%] 的备注: "
+    if "!s_msg!"=="" set "s_msg=Update %p_name%"
+    
+    git add "%p_name%"
+    git commit -m "!s_msg!"
+    echo [已提交]
+) else (
+    echo [已跳过]
+)
+exit /b
+
+:: --- 推送阶段 (通用) ---
 :PUSH_REMOTE_ONLY
 echo.
 echo --- 推送模式 ---
 echo  [1] 标准推送 (git push)
 echo  [2] 安全强推 (force-with-lease)
 echo  [3] 强制推送 (force) - 谨慎!
-echo  [0] 返回
+echo  [0] 返回菜单
 echo.
 set "pmode="
 set /p pmode="请选择: "
@@ -139,13 +213,14 @@ if "%pmode%"=="1" (
 )
 if "%pmode%"=="2" set "P_CMD=--force-with-lease" & set "P_DESC=安全强推" & goto CONFIRM_FORCE
 if "%pmode%"=="3" set "P_CMD=--force" & set "P_DESC=强制推送" & goto CONFIRM_FORCE
+if "%pmode%"=="0" goto MENU
 goto MENU
 
 :CONFIRM_FORCE
 cls
 color 0c
 echo ==========================================
-echo           警 告：准备执行 !P_DESC!
+echo            警 告：准备执行 !P_DESC!
 echo ==========================================
 echo  分支: !cur_br!
 echo.
@@ -214,20 +289,16 @@ goto MENU
 :: ==============================
 
 :GET_NOW
-:: 获取当前时间，格式化为 HH:mm:ss
 set "now_time=%time:~0,8%"
 set "now_time=%now_time: =0%"
 exit /b
 
 :SHOW_REPO_INFO
-:: 检查是否在仓库中
 git rev-parse --is-inside-work-tree >nul 2>&1
 if errorlevel 1 (
     color 0c & echo [错误] 当前目录不是 Git 仓库！ & pause & exit
 )
-:: 获取分支名
 for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "cur_br=%%B"
-:: 同步远程索引并检查差异
 git fetch --prune >nul 2>&1
 set "status_msg=已同步"
 for /f "tokens=1,2" %%i in ('git rev-list --left-right --count HEAD...@{u} 2^>nul') do (
@@ -240,7 +311,6 @@ echo ==========================================
 exit /b
 
 :CHECK_CHANGES
-:: 检查是否有未提交的改动
 set "has_change="
 for /f "delims=" %%S in ('git status --porcelain 2^>nul') do (
     set "has_change=1"
