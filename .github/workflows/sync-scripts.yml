@@ -47,6 +47,10 @@ jobs:
           curl -L https://raw.githubusercontent.com/xykt/IPQuality/main/ip.sh -o ip.sh
           chmod +x ip.sh
 
+          # tor.sh
+          curl -L https://raw.githubusercontent.com/Kevin-YST-Du/VPS-test-script/main/tor.sh -o tor.sh
+          chmod +x tor.sh
+          
           # 拉取推送.bat
           curl -L https://raw.githubusercontent.com/Kevin-YST-Du/VPS-test-script/main/拉取推送.bat -o 拉取推送.bat
           chmod +x 拉取推送.bat
