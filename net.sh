@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2025-12-23"
+script_version="v2026-01-10"
 check_bash(){
 current_bash_version=$(bash --version|head -n 1|awk '{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+(\.[0-9]+)?/) print $i}')
 major_version=$(echo "$current_bash_version"|cut -d'.' -f1)
@@ -141,7 +141,7 @@ shelp_lines=(
 "NETWORK QUALITY CHECK SCRIPT 网络质量体检脚本"
 "Interactive Interface:  bash <(curl -sL https://Net.Check.Place) -EM"
 "交互界面：              bash <(curl -sL https://Net.Check.Place) -M"
-"Parameters 参数运行: bash <(curl -sL https://Net.Check.Place) [-4] [-6] [-f] [-h] [-j] [-l language] [-n] [-y] [-E] [-L] [-M] [-P] [-R province] [-S chapters]"
+"Parameters 参数运行: bash <(curl -sL https://Net.Check.Place) [-4] [-6] [-f] [-h] [-j] [-l language] [-n] [-o outputpath] [-p] [-y] [-E] [-L] [-M] [-P] [-R province] [-S chapters]"
 "            -4                             Test IPv4                                  测试IPv4"
 "            -6                             Test IPv6                                  测试IPv6"
 "            -f                             Show full IP on reports                    报告展示完整IP地址"
@@ -163,7 +163,7 @@ shelp_lines=(
 shelp=$(printf "%s\n" "${shelp_lines[@]}")
 set_language(){
 case "$YY" in
-"en"|"jp"|"es"|"de"|"fr"|"ru"|"pt")swarn[1]="ERROR: Unsupported parameters!"
+"en")swarn[1]="ERROR: Unsupported parameters!"
 swarn[2]="ERROR: IP address format error!"
 swarn[3]="ERROR: Dependent programs are missing. Please run as root or install sudo!"
 swarn[4]="ERROR: Parameter -4 conflicts with -i or -6!"
