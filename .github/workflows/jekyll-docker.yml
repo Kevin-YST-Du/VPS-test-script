@@ -1,10 +1,10 @@
-name: Build Debian ARM64 Rootfs for Snapdragon 8 Elite
+name: Build Debian ARM64 Rootfs (High Performance & Stable)
 
 on:
   workflow_dispatch:
     inputs:
       debian_version:
-        description: 'Debian Version (sid is recommended for new CPUs)'
+        description: 'Debian Version (sid recommended)'
         required: true
         default: 'sid'
 
@@ -15,16 +15,42 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # 🧹【优化1】清理垃圾文件，腾出空间给 Swap 和构建产物
+      - name: Free Disk Space (Optimization)
+        run: |
+          echo "Cleaning up disk space..."
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf "/usr/local/share/boost"
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          # 删除多余的 Docker 镜像
+          docker image prune --all --force
+          echo "Disk space after cleanup:"
+          df -h
+
+      # 🧠【优化2】创建 8GB Swap 防止内存不足 (关键步骤)
+      - name: Create Swap Space (Prevent OOM)
+        run: |
+          export SWAP_SIZE=8G
+          echo "Creating ${SWAP_SIZE} swap file..."
+          sudo fallocate -l $SWAP_SIZE /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo "Swap status:"
+          sudo swapon --show
+          echo "Memory status:"
+          free -h
+
       - name: Install QEMU & Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y debootstrap qemu-user-static binfmt-support xz-utils
-          # 注册 QEMU 静态解释器，确保在 x86 上能跑 ARM64 命令
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
       - name: Bootstrap Stage 1 (Download)
         run: |
-          # 开启详细日志输出，使用国内镜像源加速
+          # 增加 --verbose 避免日志长时间不输出看起来像卡死
           sudo debootstrap --arch=arm64 --foreign --verbose \
             ${{ inputs.debian_version }} \
             rootfs \
@@ -32,13 +58,12 @@ jobs:
 
       - name: Bootstrap Stage 2 (Unpack)
         run: |
-          # 复制模拟器并执行第二阶段安装
           sudo cp /usr/bin/qemu-aarch64-static rootfs/usr/bin/
+          # 这里的 verbose 很重要，让你看到解压进度
           sudo chroot rootfs /debootstrap/debootstrap --second-stage --verbose
 
       - name: Configure Root & Install Desktop
         run: |
-          # 挂载必要的虚拟文件系统
           sudo mount -t proc /proc rootfs/proc
           sudo mount -t sysfs /sys rootfs/sys
           sudo mount -o bind /dev rootfs/dev
@@ -47,40 +72,41 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             echo 'nameserver 114.114.114.114' > /etc/resolv.conf
             
-            # 1. 更新并安装核心组件
+            # 安装核心工具
             apt-get update
-            apt-get install -y sudo xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server curl wget nano
+            apt-get install -y sudo curl wget nano net-tools
             
-            # 2. 配置 Root 用户密码为 1213
+            # 安装桌面环境 (这一步最耗内存，现在有 Swap 就不怕了)
+            apt-get install -y xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server
+            
+            # 配置 Root 密码和 SSH
             echo 'root:1213' | chpasswd
-            
-            # 3. 允许 Root 通过 SSH 登录
             sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-            
-            # 4. 修复环境变量，确保 root 能找到所有命令
             echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' >> /root/.bashrc
             
-            # 5. 预设 VNC 启动脚本 (可选)
+            # 预设 VNC 启动脚本
             mkdir -p /root/.vnc
             echo '#!/bin/sh' > /root/.vnc/xstartup
             echo 'startxfce4 &' >> /root/.vnc/xstartup
             chmod +x /root/.vnc/xstartup
             
             apt-get clean
+            rm -rf /var/lib/apt/lists/*
           "
           
-          # 解除挂载
           sudo umount rootfs/dev || true
           sudo umount rootfs/sys || true
           sudo umount rootfs/proc || true
 
       - name: Package & Compress
         run: |
-          # 使用所有 CPU 核心并行压缩
-          sudo tar -cI 'xz -T0' -f debian-rootfs-root.tar.xz -C rootfs .
+          # 使用 XZ 多线程压缩，这非常吃内存，现在有 15GB+ (7G物理+8G Swap) 足够安全
+          # 增加 XZ_OPT 限制内存百分比，双重保险
+          export XZ_OPT="-T0 -6 --memory=50%"
+          sudo tar -cI 'xz' -f debian-rootfs-optimized.tar.xz -C rootfs .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: debian-image
-          path: debian-rootfs-root.tar.xz
+          name: debian-image-optimized
+          path: debian-rootfs-optimized.tar.xz
