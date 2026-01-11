@@ -1,16 +1,89 @@
+name: Build Debian ARM64 Rootfs
+
+on:
+  workflow_dispatch: # 允许手动点击按钮触发
+    inputs:
+      debian_version:
+        description: 'Debian Version (e.g., trixie, sid, bookworm)'
+        required: true
+        default: 'trixie'
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # 使用较新的环境
     steps:
-      - name: 安装构建工具
-        run: sudo apt-get install -y qemu-user-static debootstrap
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - name: 构建 Debian 13 (Trixie) Rootfs
+      - name: Install Dependencies & QEMU
         run: |
-          sudo debootstrap --arch=arm64 --foreign trixie ./debian-rootfs http://mirrors.ustc.edu.cn/debian/
-          sudo cp /usr/bin/qemu-aarch64-static ./debian-rootfs/usr/bin/
-          # 进入 chroot 预装软件 (关键步骤)
-          sudo chroot ./debian-rootfs /bin/bash -c "apt update && apt install -y openssh-server xfce4 vnc4server sudo"
+          sudo apt-get update
+          sudo apt-get install -y debootstrap qemu-user-static binfmt-support xz-utils
+          # 注册 QEMU 解释器，确保能运行 ARM64 二进制
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
-      - name: 打包归档
-        run: sudo tar -cJvf rootfs-full.tar.xz -C ./debian-rootfs .
+      - name: Bootstrap Stage 1 (Download)
+        run: |
+          # 1. 下载基础包 (--foreign 是关键，因为架构不同)
+          # 使用中科大源加速
+          sudo debootstrap --arch=arm64 --foreign \
+            ${{ inputs.debian_version }} \
+            rootfs \
+            http://mirrors.ustc.edu.cn/debian/
+
+      - name: Setup QEMU for Chroot
+        run: |
+          # 2. 将 QEMU 模拟器复制进镜像，否则 chroot 会报 "Exec format error"
+          sudo cp /usr/bin/qemu-aarch64-static rootfs/usr/bin/
+
+      - name: Bootstrap Stage 2 (Install)
+        run: |
+          # 3. 在 Chroot 内部完成解压和配置
+          sudo chroot rootfs /debootstrap/debootstrap --second-stage
+
+      - name: Configure System & Install Desktop
+        run: |
+          # 挂载必要的文件系统，防止 apt 报错
+          sudo mount -t proc /proc rootfs/proc
+          sudo mount -t sysfs /sys rootfs/sys
+          sudo mount -o bind /dev rootfs/dev
+          sudo mount -o bind /dev/pts rootfs/dev/pts
+
+          # 进入 Chroot 安装软件
+          sudo chroot rootfs /bin/bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            
+            # 设置 DNS
+            echo 'nameserver 8.8.8.8' > /etc/resolv.conf
+            
+            # 更新源
+            apt-get update
+            
+            # 安装核心组件 (包含 sudo, nano, curl)
+            apt-get install -y sudo nano curl net-tools
+            
+            # 安装 XFCE4 桌面和 VNC (这一步就是帮你省去手机上下载的时间)
+            apt-get install -y xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server
+            
+            # 清理缓存减小体积
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+          "
+          
+          # 卸载挂载点
+          sudo umount rootfs/dev/pts
+          sudo umount rootfs/dev
+          sudo umount rootfs/sys
+          sudo umount rootfs/proc
+
+      - name: Package Rootfs
+        run: |
+          # 打包成 .tar.xz
+          sudo tar -cJvf debian-${{ inputs.debian_version }}-arm64.tar.xz -C rootfs .
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-rootfs
+          path: debian-${{ inputs.debian_version }}-arm64.tar.xz
+          retention-days: 3
