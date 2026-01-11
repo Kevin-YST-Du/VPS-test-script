@@ -1,89 +1,86 @@
-name: Build Debian ARM64 Rootfs
+name: Build Debian ARM64 Rootfs for Snapdragon 8 Elite
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发
+  workflow_dispatch:
     inputs:
       debian_version:
-        description: 'Debian Version (e.g., trixie, sid, bookworm)'
+        description: 'Debian Version (sid is recommended for new CPUs)'
         required: true
-        default: 'trixie'
+        default: 'sid'
 
 jobs:
   build:
-    runs-on: ubuntu-24.04 # 使用较新的环境
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Dependencies & QEMU
+      - name: Install QEMU & Build Tools
         run: |
           sudo apt-get update
           sudo apt-get install -y debootstrap qemu-user-static binfmt-support xz-utils
-          # 注册 QEMU 解释器，确保能运行 ARM64 二进制
+          # 注册 QEMU 静态解释器，确保在 x86 上能跑 ARM64 命令
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
       - name: Bootstrap Stage 1 (Download)
         run: |
-          # 1. 下载基础包 (--foreign 是关键，因为架构不同)
-          # 使用中科大源加速
-          sudo debootstrap --arch=arm64 --foreign \
+          # 开启详细日志输出，使用国内镜像源加速
+          sudo debootstrap --arch=arm64 --foreign --verbose \
             ${{ inputs.debian_version }} \
             rootfs \
             http://mirrors.ustc.edu.cn/debian/
 
-      - name: Setup QEMU for Chroot
+      - name: Bootstrap Stage 2 (Unpack)
         run: |
-          # 2. 将 QEMU 模拟器复制进镜像，否则 chroot 会报 "Exec format error"
+          # 复制模拟器并执行第二阶段安装
           sudo cp /usr/bin/qemu-aarch64-static rootfs/usr/bin/
+          sudo chroot rootfs /debootstrap/debootstrap --second-stage --verbose
 
-      - name: Bootstrap Stage 2 (Install)
+      - name: Configure Root & Install Desktop
         run: |
-          # 3. 在 Chroot 内部完成解压和配置
-          sudo chroot rootfs /debootstrap/debootstrap --second-stage
-
-      - name: Configure System & Install Desktop
-        run: |
-          # 挂载必要的文件系统，防止 apt 报错
+          # 挂载必要的虚拟文件系统
           sudo mount -t proc /proc rootfs/proc
           sudo mount -t sysfs /sys rootfs/sys
           sudo mount -o bind /dev rootfs/dev
-          sudo mount -o bind /dev/pts rootfs/dev/pts
 
-          # 进入 Chroot 安装软件
           sudo chroot rootfs /bin/bash -c "
             export DEBIAN_FRONTEND=noninteractive
+            echo 'nameserver 114.114.114.114' > /etc/resolv.conf
             
-            # 设置 DNS
-            echo 'nameserver 8.8.8.8' > /etc/resolv.conf
-            
-            # 更新源
+            # 1. 更新并安装核心组件
             apt-get update
+            apt-get install -y sudo xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server curl wget nano
             
-            # 安装核心组件 (包含 sudo, nano, curl)
-            apt-get install -y sudo nano curl net-tools
+            # 2. 配置 Root 用户密码为 1213
+            echo 'root:1213' | chpasswd
             
-            # 安装 XFCE4 桌面和 VNC (这一步就是帮你省去手机上下载的时间)
-            apt-get install -y xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server
+            # 3. 允许 Root 通过 SSH 登录
+            sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
             
-            # 清理缓存减小体积
+            # 4. 修复环境变量，确保 root 能找到所有命令
+            echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' >> /root/.bashrc
+            
+            # 5. 预设 VNC 启动脚本 (可选)
+            mkdir -p /root/.vnc
+            echo '#!/bin/sh' > /root/.vnc/xstartup
+            echo 'startxfce4 &' >> /root/.vnc/xstartup
+            chmod +x /root/.vnc/xstartup
+            
             apt-get clean
-            rm -rf /var/lib/apt/lists/*
           "
           
-          # 卸载挂载点
-          sudo umount rootfs/dev/pts
-          sudo umount rootfs/dev
-          sudo umount rootfs/sys
-          sudo umount rootfs/proc
+          # 解除挂载
+          sudo umount rootfs/dev || true
+          sudo umount rootfs/sys || true
+          sudo umount rootfs/proc || true
 
-      - name: Package Rootfs
+      - name: Package & Compress
         run: |
-          # 打包成 .tar.xz
-          sudo tar -cJvf debian-${{ inputs.debian_version }}-arm64.tar.xz -C rootfs .
+          # 使用所有 CPU 核心并行压缩
+          sudo tar -cI 'xz -T0' -f debian-rootfs-root.tar.xz -C rootfs .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: debian-rootfs
-          path: debian-${{ inputs.debian_version }}-arm64.tar.xz
-          retention-days: 3
+          name: debian-image
+          path: debian-rootfs-root.tar.xz
