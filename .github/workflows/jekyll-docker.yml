@@ -1,12 +1,13 @@
-name: Build Debian ARM64 Rootfs (High Performance & Stable)
+name: Build Debian Trixie (Stable Rootfs)
 
 on:
   workflow_dispatch:
     inputs:
       debian_version:
-        description: 'Debian Version (sid recommended)'
+        description: 'Debian Version (trixie is recommended for stability)'
         required: true
-        default: 'sid'
+        # ✅ 已改回 trixie，确保最稳的体验
+        default: 'trixie'
 
 jobs:
   build:
@@ -15,31 +16,25 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 🧹【优化1】清理垃圾文件，腾出空间给 Swap 和构建产物
-      - name: Free Disk Space (Optimization)
+      # 🧹【清理磁盘】防止构建过程中空间不足
+      - name: Free Disk Space
         run: |
           echo "Cleaning up disk space..."
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf "/usr/local/share/boost"
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          # 删除多余的 Docker 镜像
           docker image prune --all --force
-          echo "Disk space after cleanup:"
-          df -h
 
-      # 🧠【优化2】创建 8GB Swap 防止内存不足 (关键步骤)
-      - name: Create Swap Space (Prevent OOM)
+      # 🧠【防爆内存】创建 8GB Swap
+      - name: Create Swap Space
         run: |
           export SWAP_SIZE=8G
-          echo "Creating ${SWAP_SIZE} swap file..."
           sudo fallocate -l $SWAP_SIZE /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          echo "Swap status:"
-          sudo swapon --show
-          echo "Memory status:"
+          echo "Swap enabled:"
           free -h
 
       - name: Install QEMU & Build Tools
@@ -50,7 +45,7 @@ jobs:
 
       - name: Bootstrap Stage 1 (Download)
         run: |
-          # 增加 --verbose 避免日志长时间不输出看起来像卡死
+          # 使用中科大源下载 trixie
           sudo debootstrap --arch=arm64 --foreign --verbose \
             ${{ inputs.debian_version }} \
             rootfs \
@@ -59,7 +54,7 @@ jobs:
       - name: Bootstrap Stage 2 (Unpack)
         run: |
           sudo cp /usr/bin/qemu-aarch64-static rootfs/usr/bin/
-          # 这里的 verbose 很重要，让你看到解压进度
+          # 这一步会比 Sid 稍微慢一点点，因为 Trixie 的包压缩率有时不同，耐心等待
           sudo chroot rootfs /debootstrap/debootstrap --second-stage --verbose
 
       - name: Configure Root & Install Desktop
@@ -76,15 +71,15 @@ jobs:
             apt-get update
             apt-get install -y sudo curl wget nano net-tools
             
-            # 安装桌面环境 (这一步最耗内存，现在有 Swap 就不怕了)
+            # 安装 XFCE4 桌面 (Trixie 的 XFCE 版本非常稳定)
             apt-get install -y xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server
             
-            # 配置 Root 密码和 SSH
+            # 配置 Root 密码为 1213
             echo 'root:1213' | chpasswd
             sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
             echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' >> /root/.bashrc
             
-            # 预设 VNC 启动脚本
+            # 预设 VNC 启动
             mkdir -p /root/.vnc
             echo '#!/bin/sh' > /root/.vnc/xstartup
             echo 'startxfce4 &' >> /root/.vnc/xstartup
@@ -100,13 +95,12 @@ jobs:
 
       - name: Package & Compress
         run: |
-          # 使用 XZ 多线程压缩，这非常吃内存，现在有 15GB+ (7G物理+8G Swap) 足够安全
-          # 增加 XZ_OPT 限制内存百分比，双重保险
+          # 限制内存使用，防止炸 Swap
           export XZ_OPT="-T0 -6 --memory=50%"
-          sudo tar -cI 'xz' -f debian-rootfs-optimized.tar.xz -C rootfs .
+          sudo tar -cI 'xz' -f debian-trixie-arm64.tar.xz -C rootfs .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: debian-image-optimized
-          path: debian-rootfs-optimized.tar.xz
+          name: debian-trixie-image
+          path: debian-trixie-arm64.tar.xz
