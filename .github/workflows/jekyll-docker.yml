@@ -6,7 +6,6 @@ on:
       debian_version:
         description: 'Debian Version (trixie is recommended for stability)'
         required: true
-        # ✅ 已改回 trixie，确保最稳的体验
         default: 'trixie'
 
 jobs:
@@ -16,49 +15,47 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 🧹【清理磁盘】防止构建过程中空间不足
+      # 🧹【清理磁盘】确保有足够的空间存放 Rootfs 和镜像
       - name: Free Disk Space
         run: |
-          echo "Cleaning up disk space..."
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/share/dotnet /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           docker image prune --all --force
 
-      # 🧠【防爆内存】创建 8GB Swap
+      # 🧠【防爆内存】创建 8GB Swap，防止安装桌面环境时内存溢出
       - name: Create Swap Space
         run: |
-          export SWAP_SIZE=8G
-          sudo fallocate -l $SWAP_SIZE /swapfile
+          sudo fallocate -l 8G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
-          echo "Swap enabled:"
           free -h
 
+      # 🛠️【环境准备】安装交叉编译和构建工具
       - name: Install QEMU & Build Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y debootstrap qemu-user-static binfmt-support xz-utils
+          sudo apt-get install -y debootstrap qemu-user-static binfmt-support
+          # 注册 QEMU 解释器，使 x86 机器能运行 arm64 指令
           docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
 
+      # 📥【第一阶段】从镜像源下载基础包
       - name: Bootstrap Stage 1 (Download)
         run: |
-          # 使用中科大源下载 trixie
           sudo debootstrap --arch=arm64 --foreign --verbose \
             ${{ inputs.debian_version }} \
             rootfs \
             http://mirrors.ustc.edu.cn/debian/
 
+      # 📦【第二阶段】在 chroot 环境内解压包
       - name: Bootstrap Stage 2 (Unpack)
         run: |
           sudo cp /usr/bin/qemu-aarch64-static rootfs/usr/bin/
-          # 这一步会比 Sid 稍微慢一点点，因为 Trixie 的包压缩率有时不同，耐心等待
           sudo chroot rootfs /debootstrap/debootstrap --second-stage --verbose
 
+      # 🖥️【系统配置】配置 Root 权限、网络和 XFCE4 桌面
       - name: Configure Root & Install Desktop
         run: |
+          # 挂载必要文件系统
           sudo mount -t proc /proc rootfs/proc
           sudo mount -t sysfs /sys rootfs/sys
           sudo mount -o bind /dev rootfs/dev
@@ -67,40 +64,43 @@ jobs:
             export DEBIAN_FRONTEND=noninteractive
             echo 'nameserver 114.114.114.114' > /etc/resolv.conf
             
-            # 安装核心工具
+            # 更新源并安装常用工具及桌面
             apt-get update
-            apt-get install -y sudo curl wget nano net-tools
+            apt-get install -y sudo curl wget nano net-tools xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server
             
-            # 安装 XFCE4 桌面 (Trixie 的 XFCE 版本非常稳定)
-            apt-get install -y xfce4 xfce4-goodies tightvncserver dbus-x11 openssh-server
-            
-            # 配置 Root 密码为 1213
+            # 设置 Root 密码
             echo 'root:1213' | chpasswd
+            
+            # 允许 SSH Root 登录
             sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+            
+            # 补全环境变量
             echo 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' >> /root/.bashrc
             
-            # 预设 VNC 启动
+            # 配置 VNC 默认启动 XFCE4
             mkdir -p /root/.vnc
-            echo '#!/bin/sh' > /root/.vnc/xstartup
-            echo 'startxfce4 &' >> /root/.vnc/xstartup
+            echo -e '#!/bin/sh\nstartxfce4 &' > /root/.vnc/xstartup
             chmod +x /root/.vnc/xstartup
             
+            # 清理缓存减少体积
             apt-get clean
             rm -rf /var/lib/apt/lists/*
           "
           
-          sudo umount rootfs/dev || true
-          sudo umount rootfs/sys || true
-          sudo umount rootfs/proc || true
+          # 卸载挂载点，使用 -l 防止设备忙报错
+          sudo umount -l rootfs/dev || true
+          sudo umount -l rootfs/sys || true
+          sudo umount -l rootfs/proc || true
 
+      # 🗜️【打包阶段】使用 GZIP 快速压缩
       - name: Package & Compress
         run: |
-          # 限制内存使用，防止炸 Swap
-          export XZ_OPT="-T0 -6 --memory=50%"
-          sudo tar -cI 'xz' -f debian-trixie-arm64.tar.xz -C rootfs .
+          # 移除旧的 xz 参数，改用高效的 gzip
+          sudo tar -czf debian-trixie-arm64.tar.gz -C rootfs .
 
+      # 📤【上传成品】
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: debian-trixie-image
-          path: debian-trixie-arm64.tar.xz
+          path: debian-trixie-arm64.tar.gz
