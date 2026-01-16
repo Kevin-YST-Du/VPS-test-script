@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2026-01-10"
+script_version="v2026-01-15"
 check_bash(){
 current_bash_version=$(bash --version|head -n 1|awk '{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+(\.[0-9]+)?/) print $i}')
 major_version=$(echo "$current_bash_version"|cut -d'.' -f1)
@@ -198,7 +198,8 @@ shead[title]="NET QUALITY CHECK REPORT: "
 shead[ver]="Version: $script_version"
 shead[bash]="bash <(curl -sL https://Check.Place) -EN"
 shead[git]="https://github.com/xykt/NetQuality"
-shead[time]=$(date -u +"Report Time: %Y-%m-%d %H:%M:%S UTC")
+shead[time_raw]=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+shead[time]="Report Time: ${shead[time_raw]}"
 shead[ltitle]=26
 shead[ptime]=$(printf '%11s' '')
 sbgp[title]="1. BGP Information (${Font_I}BGP.TOOLS & HE.NET$Font_Suffix)"
@@ -295,7 +296,8 @@ shead[title]="网络质量体检报告："
 shead[ver]="脚本版本：$script_version"
 shead[bash]="bash <(curl -sL https://Check.Place) -N"
 shead[git]="https://github.com/xykt/NetQuality"
-shead[time]=$(TZ="Asia/Shanghai" date +"报告时间：%Y-%m-%d %H:%M:%S CST")
+shead[time_raw]=$(TZ="Asia/Shanghai" date +"%Y-%m-%d %H:%M:%S CST")
+shead[time]="报告时间：${shead[time_raw]}"
 shead[ltitle]=18
 shead[ptime]=$(printf '%12s' '')
 sbgp[title]="一、BGP信息（${Font_I}BGP.TOOLS & HE.NET$Font_Suffix）"
@@ -2740,7 +2742,9 @@ content=$(curl -fsL --max-time 5 "${rawgithub}main/ref/ad$i.ans")||break
 ads+=("$content")
 ((i++))
 done
+ADLines=0
 local adCount=${#ads[@]}
+[[ $adCount -eq 0 ]]&&return
 local -a indices=()
 for ((i=1; i<=adCount; i++));do indices+=("$i");done
 for ((i=adCount-1; i>0; i--));do
@@ -2756,7 +2760,6 @@ aad[${indices[i]}]="${ads[i]}"
 done
 local rows cols
 if ! read rows cols < <(stty size 2>/dev/null);then cols=0;fi
-ADLines=0
 print_pair(){
 local left="$1" right="$2"
 local -a L R
@@ -2833,57 +2836,58 @@ local bgp_updates=""
 local local_updates=""
 local connectivity_updates=""
 if [ $fullIP -eq 1 ];then
-head_updates+=".Head |= map(. + { IP: \"${IP:-null}\" }) | "
+head_updates+=".Head |= . + { IP: \"${IP:-null}\" } | "
 else
-head_updates+=".Head |= map(. + { IP: \"${IPhide:-null}\" }) | "
+head_updates+=".Head |= . + { IP: \"${IPhide:-null}\" } | "
 fi
-head_updates+=".Head |= map(. + { Command: \"${shead[bash]:-null}\" }) | "
-head_updates+=".Head |= map(. + { GitHub: \"${shead[git]:-null}\" }) | "
-head_updates+=".Head |= map(. + { Time: \"${shead[time]:-null}\" }) | "
-head_updates+=".Head |= map(. + { Version: \"${shead[ver]:-null}\" }) | "
-local first_asn=$(echo "${bgp[asn]}"|awk -F',' '{print $1}'|sed 's/^AS//')
+head_updates+=".Head |= . + { Command: \"${shead[bash]:-null}\" } | "
+head_updates+=".Head |= . + { GitHub: \"${shead[git]:-null}\" } | "
+head_updates+=".Head |= . + { Time: \"${shead[time_raw]:-null}\" } | "
+head_updates+=".Head |= . + { Version: \"${script_version:-null}\" } | "
+local first_asn
+first_asn=$(echo "${bgp[asn]}"|awk -F',' '{print $1}'|sed 's/^AS//')
 first_asn=${first_asn:-null}
-bgp_updates+=".BGP |= map(. + { ASN: \"$first_asn\" }) | "
-bgp_updates+=".BGP |= map(. + { Organization: \"${bgp[org]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { Prefix: ${bgp[prefixnum]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { RIR: \"${bgp[rir]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { RegDate: \"${bgp[regdate]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { ModDate: \"${bgp[moddate]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { Country: \"${bgp[country]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { IntermediateRegion: \"${bgp[intermediateregion]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { SubRegion: \"${bgp[subregion]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { Region: \"${bgp[region]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { Address: \"${bgp[address]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { GeoFeed: \"${bgp[geofeed]:-null}\" }) | "
+bgp_updates+=".BGP |= . + { ASN: \"$first_asn\" } | "
+bgp_updates+=".BGP |= . + { Organization: \"${bgp[org]:-null}\" } | "
+bgp_updates+=".BGP |= . + { Prefix: ${bgp[prefixnum]:-null} } | "
+bgp_updates+=".BGP |= . + { RIR: \"${bgp[rir]:-null}\" } | "
+bgp_updates+=".BGP |= . + { RegDate: \"${bgp[regdate]:-null}\" } | "
+bgp_updates+=".BGP |= . + { ModDate: \"${bgp[moddate]:-null}\" } | "
+bgp_updates+=".BGP |= . + { Country: \"${bgp[country]:-null}\" } | "
+bgp_updates+=".BGP |= . + { IntermediateRegion: \"${bgp[intermediateregion]:-null}\" } | "
+bgp_updates+=".BGP |= . + { SubRegion: \"${bgp[subregion]:-null}\" } | "
+bgp_updates+=".BGP |= . + { Region: \"${bgp[region]:-null}\" } | "
+bgp_updates+=".BGP |= . + { Address: \"${bgp[address]:-null}\" } | "
+bgp_updates+=".BGP |= . + { GeoFeed: \"${bgp[geofeed]:-null}\" } | "
 if [[ -n ${bgp[iptotal]} && -n ${bgp[ipactive]} ]];then
-bgp_updates+=".BGP |= map(. + { IPinTotal: ${bgp[iptotal]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { IPActive: ${bgp[ipactive]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { NeighborinTotal: ${bgp[neighbortotal]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { NeighborActive: ${bgp[neighboractive]:-null} }) | "
+bgp_updates+=".BGP |= . + { IPinTotal: ${bgp[iptotal]:-null} } | "
+bgp_updates+=".BGP |= . + { IPActive: ${bgp[ipactive]:-null} } | "
+bgp_updates+=".BGP |= . + { NeighborinTotal: ${bgp[neighbortotal]:-null} } | "
+bgp_updates+=".BGP |= . + { NeighborActive: ${bgp[neighboractive]:-null} } | "
 elif [[ -n ${bgp[neighbortotal]} && -n ${bgp[neighboractive]} ]];then
-bgp_updates+=".BGP |= map(. + { IPinTotal: ${bgp[neighbortotal]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { IPActive: ${bgp[neighboractive]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { NeighborinTotal: ${bgp[neighbortotal]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { NeighborActive: ${bgp[neighboractive]:-null} }) | "
+bgp_updates+=".BGP |= . + { IPinTotal: ${bgp[neighbortotal]:-null} } | "
+bgp_updates+=".BGP |= . + { IPActive: ${bgp[neighboractive]:-null} } | "
+bgp_updates+=".BGP |= . + { NeighborinTotal: ${bgp[neighbortotal]:-null} } | "
+bgp_updates+=".BGP |= . + { NeighborActive: ${bgp[neighboractive]:-null} } | "
 else
-bgp_updates+=".BGP |= map(. + { IPinTotal: null }) | "
-bgp_updates+=".BGP |= map(. + { IPActive: null }) | "
-bgp_updates+=".BGP |= map(. + { NeighborinTotal: null }) | "
-bgp_updates+=".BGP |= map(. + { NeighborActive: null }) | "
+bgp_updates+=".BGP |= . + { IPinTotal: null } | "
+bgp_updates+=".BGP |= . + { IPActive: null } | "
+bgp_updates+=".BGP |= . + { NeighborinTotal: null } | "
+bgp_updates+=".BGP |= . + { NeighborActive: null } | "
 fi
-local_updates+=".Local |= map(. + { NAT: \"${getnat[nat]:-null}\" }) | "
-local_updates+=".Local |= map(. + { NATDescribe: \"$(echo -e "${slocal[${getnat[type]:-0}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
-local_updates+=".Local |= map(. + { Mapping: \"$(echo -e "${slocal[m${getnat[m]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
-local_updates+=".Local |= map(. + { Filter: \"$(echo -e "${slocal[f${getnat[f]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
-local_updates+=".Local |= map(. + { Port: \"$(echo -e "${slocal[p${getnat[p]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
-local_updates+=".Local |= map(. + { Hairpin: \"$(echo -e "${slocal[h${getnat[h]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" }) | "
-local_updates+=".Local |= map(. + { TCPCongestionControl: \"${gettcp[tcpcc]:-null}\" }) | "
-local_updates+=".Local |= map(. + { QueueDiscipline: \"${gettcp[qdisc]:-null}\" }) | "
-local_updates+=".Local |= map(. + { TCPReceiveBuffer: \"${gettcp[rmem]:-null}\" }) | "
-local_updates+=".Local |= map(. + { TCPSendBuffer: \"${gettcp[wmem]:-null}\" }) | "
-bgp_updates+=".BGP |= map(. + { IXCount: ${conn[ix]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { UpstreamsCount: ${conn[upstreams]:-null} }) | "
-bgp_updates+=".BGP |= map(. + { PeersCount: ${conn[peers]:-null} }) | "
+local_updates+=".Local |= . + { NAT: \"${getnat[nat]:-null}\" } | "
+local_updates+=".Local |= . + { NATDescribe: \"$(echo -e "${slocal[${getnat[type]:-0}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" } | "
+local_updates+=".Local |= . + { Mapping: \"$(echo -e "${slocal[m${getnat[m]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" } | "
+local_updates+=".Local |= . + { Filter: \"$(echo -e "${slocal[f${getnat[f]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" } | "
+local_updates+=".Local |= . + { Port: \"$(echo -e "${slocal[p${getnat[p]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" } | "
+local_updates+=".Local |= . + { Hairpin: \"$(echo -e "${slocal[h${getnat[h]}]:-null}"|sed -E 's/\x1B\[[0-9;]*[a-zA-Z]//g'|xargs)\" } | "
+local_updates+=".Local |= . + { TCPCongestionControl: \"${gettcp[tcpcc]:-null}\" } | "
+local_updates+=".Local |= . + { QueueDiscipline: \"${gettcp[qdisc]:-null}\" } | "
+local_updates+=".Local |= . + { TCPReceiveBuffer: \"${gettcp[rmem]:-null}\" } | "
+local_updates+=".Local |= . + { TCPSendBuffer: \"${gettcp[wmem]:-null}\" } | "
+bgp_updates+=".BGP |= . + { IXCount: ${conn[ix]:-null} } | "
+bgp_updates+=".BGP |= . + { UpstreamsCount: ${conn[upstreams]:-null} } | "
+bgp_updates+=".BGP |= . + { PeersCount: ${conn[peers]:-null} } | "
 for id in $(echo "${!casn[@]}"|tr ' ' '\n'|sort -n);do
 if [[ -z ${casn[$id]} ]];then
 continue
@@ -2957,9 +2961,9 @@ check_Net(){
 IP=$1
 ibar_step=0
 netdata='{
-      "Head": [{}],
-      "BGP": [{}],
-      "Local": [{}],
+      "Head": {},
+      "BGP": {},
+      "Local": {},
       "Connectivity": [],
       "Delay": [],
       "Speedtest": [],
