@@ -2,12 +2,12 @@
 setlocal EnableExtensions EnableDelayedExpansion
 
 :: ==========================================
-:: Git 快捷管理助手 v3.2 (稳定修复版)
+:: Git 快捷管理助手 v3.3 (修复版)
 :: ==========================================
 
 :: 设置 UTF-8 编码
 chcp 65001 >nul
-title Git 快捷助手 v3.2
+title Git 快捷助手 v3.3
 color 0b
 
 :: --- 环境自检 ---
@@ -31,8 +31,7 @@ call :SHOW_REPO_INFO
 echo.
 echo    [1] 状态查询 (Status)
 echo    [2] 拉取更新 (Pull / Rebase)
-:: --- 下面这一行彻底移除了特殊符号 & 和 () ---
-echo    [3] 提交推送 [Smart Commit + Push]  [更新!]
+echo    [3] 提交推送 [Smart Commit + Push]
 echo    [4] 一键同步 (Sync: Pull+Commit+Push)
 echo    [5] 清理工具 (Clean Untracked)
 echo    [0] 退出
@@ -69,10 +68,11 @@ goto MENU
 :STEP_PULL
 cls
 echo --- Pull 模式选择 ---
-echo  [1] 普通拉取 (git pull)
-echo  [2] 变基拉取 (git pull --rebase) - 推荐
-echo  [3] 强力拉取 (Stash -> Pull -> Pop)
-echo  [0] 返回
+echo   [1] 普通拉取 (git pull)
+echo   [2] 变基拉取 (git pull --rebase) - 推荐
+:: 【修复点1】这里的 -> 必须写成 -^>，否则会生成名为 "Pull" 的垃圾文件
+echo   [3] 强力拉取 (Stash -^> Pull -^> Pop)
+echo   [0] 返回
 echo.
 set "pull_mode="
 set /p pull_mode="请选择: "
@@ -110,9 +110,9 @@ if not defined has_change (
 )
 
 echo --- 提交模式选择 ---
-echo  [1] 打包提交 (所有文件使用同一个备注)
-echo  [2] 逐个提交 (依次询问每个文件并写备注)
-echo  [0] 返回
+echo   [1] 打包提交 (所有文件使用同一个备注)
+echo   [2] 逐个提交 (依次询问每个文件并写备注)
+echo   [0] 返回
 echo.
 set "commit_mode="
 set /p commit_mode="请选择模式: "
@@ -199,10 +199,10 @@ exit /b
 :PUSH_REMOTE_ONLY
 echo.
 echo --- 推送模式 ---
-echo  [1] 标准推送 (git push)
-echo  [2] 安全强推 (force-with-lease)
-echo  [3] 强制推送 (force) - 谨慎!
-echo  [0] 返回菜单
+echo   [1] 标准推送 (git push)
+echo   [2] 安全强推 (force-with-lease)
+echo   [3] 强制推送 (force) - 谨慎!
+echo   [0] 返回菜单
 echo.
 set "pmode="
 set /p pmode="请选择: "
@@ -220,9 +220,9 @@ goto MENU
 cls
 color 0c
 echo ==========================================
-echo            警 告：准备执行 !P_DESC!
+echo             警 告：准备执行 !P_DESC!
 echo ==========================================
-echo  分支: !cur_br!
+echo   分支: !cur_br!
 echo.
 set /p c1="[确认 1/2] 确定强推? (y/n): "
 if /i not "!c1!"=="y" ( color 0b & goto MENU )
@@ -277,7 +277,8 @@ goto MENU
 cls
 echo [警告] 这将永久删除所有未被 Git 追踪的文件和文件夹。
 set /p c_confirm="确定清理吗? (y/n): "
-if /i "%c_confirm!"=="y" (
+:: 【修复点2】这里原本写成了 %c_confirm!，导致变量无法扩展，已修正为 !c_confirm!
+if /i "!c_confirm!"=="y" (
     git clean -fd
     echo [完成] 清理完毕。
 )
@@ -301,6 +302,7 @@ if errorlevel 1 (
 for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "cur_br=%%B"
 git fetch --prune >nul 2>&1
 set "status_msg=已同步"
+:: 这里的 2^>nul 已经正确转义，无需修改
 for /f "tokens=1,2" %%i in ('git rev-list --left-right --count HEAD...@{u} 2^>nul') do (
     set "status_msg=本地领先 %%i | 远程领先 %%j"
 )
