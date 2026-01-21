@@ -45,6 +45,30 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # =========================================================
+# [新增] 自动添加快捷键 r（仅第一次写入，不重复添加）
+# =========================================================
+auto_add_shortcut_r() {
+  local cmd="bash <(curl -Lso- https://sink.spacenb.com/root)"
+
+  # 选择 shell 配置文件：bash -> ~/.bashrc, zsh -> ~/.zshrc
+  local shell_config="$HOME/.bashrc"
+  if [[ "$SHELL" =~ "zsh" ]]; then
+    shell_config="$HOME/.zshrc"
+  fi
+
+  # 确保文件存在
+  [[ -f "$shell_config" ]] || touch "$shell_config"
+
+  # ✅ 强制删除旧的 alias r=（避免重复/冲突）
+  sed -i "/^[[:space:]]*alias[[:space:]]\+r=/d" "$shell_config"
+
+  # ✅ 强制写入新的 r 快捷键
+  echo "alias r='$cmd'" >> "$shell_config"
+
+  log "已强制写入快捷键 r 到 $shell_config：$cmd"
+}
+
+# =========================================================
 #  主菜单显示函数
 # =========================================================
 display_menu() {
@@ -69,6 +93,7 @@ display_menu() {
 
     echo -e "${BLUE}=====================================${NC}"
     echo -e "${GREEN}日志文件位置：${NC} ${YELLOW}/root/root.log${NC}"
+    echo -e "${YELLOW}快捷键已设置为r,下次运行输入r可快速启动此脚本${NC}"
     echo -e "${BLUE}=====================================${NC}"
     read -p "请选择功能 [1-13]: " mu
 }
@@ -824,6 +849,8 @@ set_shortcut() {
 # =========================================================
 # 主循环
 # =========================================================
+auto_add_shortcut_r
+
 while true; do
     display_menu
 
