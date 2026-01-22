@@ -1002,8 +1002,6 @@ add_custom_ip() {
         {
             echo ""
             echo "$MARK_BEGIN"
-            # 你原本的 replace 定义是“清除该协议全局地址，仅保留你设置的 IP”
-            # 这里仍保留 flush 行（注意：会清掉该接口该协议的所有 global 地址）
             echo "up ${CMD_FLUSH}"
             echo "up ${CMD_ADD}"
             echo "down ${CMD_DEL}"
@@ -1048,6 +1046,7 @@ add_custom_ip() {
     echo -e "${GREEN}当前 ${IFACE} IPv6 地址：${NC}"
     ip -6 addr show dev "$IFACE"
 }
+
 
 # =========================================================
 # 主循环
