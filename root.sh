@@ -856,7 +856,7 @@ set_shortcut() {
 # - 不要求用户输入 CIDR：让用户选择默认 v4=/32 v6=/64 或自定义前缀
 # - 写完后重启网络（调用你已有 restart_all_interfaces）
 # =========================================================
-multi_ip_manager() {
+add_custom_ip() {
     echo -e "${BLUE}===== 多IP 配置管理 (interfaces.d) =====${NC}"
     confirm_action || return 1
 
