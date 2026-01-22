@@ -850,6 +850,8 @@ set_shortcut() {
 
 # =========================================================
 # 13. 自定义添加/替换 IPv4/IPv6 地址（写入 /etc/network/interfaces 并重启网络）
+# - add：可追加多个 IP（同网卡同协议写到同一个 block 里）
+# - replace：清除该 block 并重写（可选 flush）
 # =========================================================
 add_custom_ip() {
     echo -e "${BLUE}===== 自定义添加/替换 IPv4/IPv6 地址（写入 interfaces） =====${NC}"
@@ -912,8 +914,8 @@ add_custom_ip() {
     # -------------------------
     echo
     echo -e "${GREEN}请选择操作方式：${NC}"
-    echo -e "${GREEN}1. 新增（Add）— 在现有地址基础上增加一个 IP${NC}"
-    echo -e "${GREEN}2. 替换（Replace）— 清除该协议现有全局地址，仅保留你设置的 IP${NC}"
+    echo -e "${GREEN}1. 新增（Add）— 在现有地址基础上增加一个 IP（支持多次追加）${NC}"
+    echo -e "${GREEN}2. 替换（Replace）— 覆盖本脚本写入的同网卡同协议记录${NC}"
     read -p "请选择 [1-2]: " op_choice
 
     local OP_MODE
@@ -932,7 +934,7 @@ add_custom_ip() {
     local IPADDR PREFIX
     if [[ "$ip_choice" == "1" ]]; then
         read -p "请输入 IPv4 地址（例：203.0.113.10）: " IPADDR
-        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，直接回车使用默认）: " PREFIX
+        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
         [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
 
         [[ -z "$IPADDR" || -z "$PREFIX" ]] && { echo -e "${RED}IPv4 地址或前缀不能为空${NC}"; return 1; }
@@ -951,7 +953,7 @@ add_custom_ip() {
 
     else
         read -p "请输入 IPv6 地址（例：2a0a:8dc0:fb:bbb9::11）: " IPADDR
-        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，直接回车使用默认）: " PREFIX
+        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
         [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
 
         [[ -z "$IPADDR" || -z "$PREFIX" ]] && { echo -e "${RED}IPv6 地址或前缀不能为空${NC}"; return 1; }
@@ -978,40 +980,61 @@ add_custom_ip() {
     confirm_action || return 1
 
     # -------------------------
-    # 5) 写入 /etc/network/interfaces
+    # 5) 写入 /etc/network/interfaces（支持追加多条）
     # -------------------------
     local IF_FILE="/etc/network/interfaces"
     local MARK_BEGIN="# === root.sh extra ips begin (${IFACE}/${IP_FAMILY}) ==="
     local MARK_END="# === root.sh extra ips end (${IFACE}/${IP_FAMILY}) ==="
 
-    # 先备份
+    # 备份
     cp "$IF_FILE" "${IF_FILE}.bak.$(date +%F_%H%M%S)"
     log "已备份：${IF_FILE}"
 
-    # 如果 replace：删掉旧 block（同网卡同协议）
-    sed -i "/${MARK_BEGIN}/,/${MARK_END}/d" "$IF_FILE"
+    # 便于 sed 匹配（转义特殊字符）
+    local MB_ESC ME_ESC
+    MB_ESC=$(printf '%s' "$MARK_BEGIN" | sed 's/[][\/.^$*]/\\&/g')
+    ME_ESC=$(printf '%s' "$MARK_END"   | sed 's/[][\/.^$*]/\\&/g')
 
-    # 如果 add：也建议统一由 block 管理（避免反复追加乱）
-    # 所以 add 模式我们也删旧 block，再重新写回（更整洁）
-    if [[ "$OP_MODE" == "add" ]]; then
-        sed -i "/${MARK_BEGIN}/,/${MARK_END}/d" "$IF_FILE"
-    fi
-
-    echo "" >> "$IF_FILE"
-    echo "${MARK_BEGIN}" >> "$IF_FILE"
-
-    # replace 模式：先 flush 再 add
+    # 若为 replace：删掉旧 block 再重建
     if [[ "$OP_MODE" == "replace" ]]; then
-        echo "up ${CMD_FLUSH}" >> "$IF_FILE"
+        sed -i "/${MB_ESC}/,/${ME_ESC}/d" "$IF_FILE"
+
+        {
+            echo ""
+            echo "$MARK_BEGIN"
+            # 你原本的 replace 定义是“清除该协议全局地址，仅保留你设置的 IP”
+            # 这里仍保留 flush 行（注意：会清掉该接口该协议的所有 global 地址）
+            echo "up ${CMD_FLUSH}"
+            echo "up ${CMD_ADD}"
+            echo "down ${CMD_DEL}"
+            echo "$MARK_END"
+        } >> "$IF_FILE"
+
+        log "replace 写入：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
+
+    else
+        # add 模式：如果 block 不存在 -> 新建 block
+        if ! grep -qF "$MARK_BEGIN" "$IF_FILE"; then
+            {
+                echo ""
+                echo "$MARK_BEGIN"
+                echo "up ${CMD_ADD}"
+                echo "down ${CMD_DEL}"
+                echo "$MARK_END"
+            } >> "$IF_FILE"
+            log "add 新建 block：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
+        else
+            # block 存在：去重后插入到 END 前（实现多条追加）
+            if grep -qF "up ${CMD_ADD}" "$IF_FILE"; then
+                echo -e "${YELLOW}该地址已存在于 interfaces（重复），跳过写入。${NC}"
+                log "add 跳过重复：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
+            else
+                # 在 end 标记前插入两行
+                sed -i "/${ME_ESC}/i up ${CMD_ADD}\ndown ${CMD_DEL}" "$IF_FILE"
+                log "add 追加写入：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
+            fi
+        fi
     fi
-
-    # add 模式 / replace 模式都写入 add/del
-    echo "up ${CMD_ADD}" >> "$IF_FILE"
-    echo "down ${CMD_DEL}" >> "$IF_FILE"
-
-    echo "${MARK_END}" >> "$IF_FILE"
-
-    log "已写入 /etc/network/interfaces：${IFACE} ${IP_FAMILY} ${OP_MODE} ${IPADDR}/${PREFIX}"
 
     # -------------------------
     # 6) 重启网络生效
@@ -1025,7 +1048,6 @@ add_custom_ip() {
     echo -e "${GREEN}当前 ${IFACE} IPv6 地址：${NC}"
     ip -6 addr show dev "$IFACE"
 }
-
 
 # =========================================================
 # 主循环
