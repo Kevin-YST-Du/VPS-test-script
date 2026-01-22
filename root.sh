@@ -849,190 +849,255 @@ set_shortcut() {
 }
 
 # =========================================================
-# 13. 自定义添加/替换 IPv4/IPv6 地址（写入 /etc/network/interfaces.d 并重启网络）
-# - 支持一次输入多个 IP（空格/逗号分隔）
-# - 每个 IP 生成一条 up/down（符合 ip addr add 语法）
-# - 修复：sed 插入时不使用 \n，避免不同系统 sed 行为不一致
-# - 增强：基础校验 IPv4/IPv6 格式（防止把脏数据写进 interfaces）
+# 13. 多 IP 设置（IPv4/IPv6 自定义 + 持久化 + 自动重启网络）
 # =========================================================
-add_custom_ip() {
-    echo -e "${BLUE}===== 自定义添加/替换 IPv4/IPv6 地址（写入 interfaces.d） =====${NC}"
+multi_ip_manager() {
+    echo -e "${BLUE}===== 多 IP 设置（IPv4/IPv6）=====${NC}"
     confirm_action || return 1
 
-    [[ $EUID -ne 0 ]] && { echo -e "${RED}请使用 root 权限运行！${NC}"; return 1; }
-
-    echo -e "${YELLOW}检测到以下网卡：${NC}"
-    mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$')
-    [[ ${#IFACES[@]} -eq 0 ]] && { echo -e "${RED}未检测到可用网卡！${NC}"; return 1; }
-
-    local idx=1
-    for nic in "${IFACES[@]}"; do
-        local state has_ip
-        state=$(cat "/sys/class/net/${nic}/operstate" 2>/dev/null)
-        has_ip=$(ip -o addr show dev "$nic" | wc -l)
-        echo -e "${GREEN}${idx}.${NC} ${BLUE}${nic}${NC}  (state=${state}, addrs=${has_ip})"
-        idx=$((idx+1))
-    done
-
-    read -p "请选择要配置的网卡 [1-${#IFACES[@]}]: " nic_choice
-    if ! [[ "$nic_choice" =~ ^[0-9]+$ ]] || (( nic_choice < 1 || nic_choice > ${#IFACES[@]} )); then
+    # 1) 选择 IPv4/IPv6
+    echo -e "${GREEN}1. 添加 IPv4 地址（默认 /32）${NC}"
+    echo -e "${GREEN}2. 添加 IPv6 地址（默认 /64）${NC}"
+    read -p "请选择 [1-2]: " ipver
+    if [[ "$ipver" != "1" && "$ipver" != "2" ]]; then
         echo -e "${RED}无效选择${NC}"
         return 1
     fi
-    local IFACE="${IFACES[$((nic_choice-1))]}"
-    echo -e "${GREEN}已选择网卡：${IFACE}${NC}"
 
-    echo
-    echo -e "${GREEN}请选择要配置的 IP 类型：${NC}"
-    echo -e "${GREEN}1. IPv4${NC}"
-    echo -e "${GREEN}2. IPv6${NC}"
-    read -p "请选择 [1-2]: " ip_choice
+    # 2) 自动识别默认网卡（可手工改）
+    default_iface=""
+    if [[ "$ipver" == "1" ]]; then
+        default_iface=$(ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    else
+        default_iface=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    fi
 
-    local DEFAULT_PREFIX IP_FAMILY CMD_FLUSH
-    if [[ "$ip_choice" == "1" ]]; then
+    if [[ -z "$default_iface" ]]; then
+        default_iface=$(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$' | head -n1)
+    fi
+
+    echo -e "${YELLOW}检测到默认网卡：${NC}${GREEN}${default_iface}${NC}"
+    read -p "请输入网卡名（直接回车使用默认：$default_iface）: " iface
+    [[ -z "$iface" ]] && iface="$default_iface"
+
+    if ! ip link show "$iface" >/dev/null 2>&1; then
+        echo -e "${RED}网卡不存在：$iface${NC}"
+        return 1
+    fi
+
+    # 3) 输入 IP + 前缀（支持：直接输入IP/CIDR 或 只输入IP）
+    if [[ "$ipver" == "1" ]]; then
         DEFAULT_PREFIX=32
-        IP_FAMILY="inet"
-        CMD_FLUSH="ip -4 addr flush dev ${IFACE} scope global"
-    elif [[ "$ip_choice" == "2" ]]; then
+        read -p "请输入 IPv4 地址（可写 1.2.3.4 或 1.2.3.4/24；默认 /${DEFAULT_PREFIX}）: " ip_input
+
+        if [[ -z "$ip_input" ]]; then
+            echo -e "${RED}IPv4 不能为空${NC}"
+            return 1
+        fi
+
+        if [[ "$ip_input" == */* ]]; then
+            ip_cidr="$ip_input"
+        else
+            read -p "请输入 IPv4 前缀 (0-32，回车默认 ${DEFAULT_PREFIX}): " prefix
+            [[ -z "$prefix" ]] && prefix="$DEFAULT_PREFIX"
+            if ! [[ "$prefix" =~ ^[0-9]+$ ]] || [[ "$prefix" -lt 0 || "$prefix" -gt 32 ]]; then
+                echo -e "${RED}IPv4 前缀必须是 0-32${NC}"
+                return 1
+            fi
+            ip_cidr="${ip_input}/${prefix}"
+        fi
+
+        # 基本格式校验（IPv4 + 前缀）
+        if ! [[ "$ip_cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$ ]]; then
+            echo -e "${RED}IPv4 CIDR 格式不正确！示例：192.168.1.100/32 或 192.168.1.100/24${NC}"
+            return 1
+        fi
+
+    else
         DEFAULT_PREFIX=64
-        IP_FAMILY="inet6"
-        CMD_FLUSH="ip -6 addr flush dev ${IFACE} scope global"
-    else
-        echo -e "${RED}无效选择${NC}"
-        return 1
-    fi
+        read -p "请输入 IPv6 地址（可写 2408::1 或 2408::1/64；默认 /${DEFAULT_PREFIX}）: " ip_input
 
-    echo
-    echo -e "${GREEN}请选择操作方式：${NC}"
-    echo -e "${GREEN}1. 新增（Add）— 追加（支持多条）${NC}"
-    echo -e "${GREEN}2. 替换（Replace）— 覆盖该网卡/协议的本脚本记录${NC}"
-    read -p "请选择 [1-2]: " op_choice
-
-    local OP_MODE
-    if [[ "$op_choice" == "1" ]]; then
-        OP_MODE="add"
-    elif [[ "$op_choice" == "2" ]]; then
-        OP_MODE="replace"
-    else
-        echo -e "${RED}无效选择${NC}"
-        return 1
-    fi
-
-    echo
-    read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
-    [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
-
-    if [[ ! "$PREFIX" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}前缀必须是数字${NC}"
-        return 1
-    fi
-    if [[ "$ip_choice" == "1" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 32 ) ]]; then
-        echo -e "${RED}IPv4 前缀范围应为 0-32${NC}"
-        return 1
-    fi
-    if [[ "$ip_choice" == "2" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 128 ) ]]; then
-        echo -e "${RED}IPv6 前缀范围应为 0-128${NC}"
-        return 1
-    fi
-
-    echo
-    echo -e "${YELLOW}支持输入多个 IP（空格或逗号分隔），可带或不带 /prefix。${NC}"
-    if [[ "$ip_choice" == "1" ]]; then
-        read -p "请输入 IPv4 地址列表（例：203.0.113.10,203.0.113.11/32 203.0.113.12）: " IP_LIST_RAW
-    else
-        read -p "请输入 IPv6 地址列表（例：2a0a:...:1,2a0a:...:2/64 2a0a:...:3）: " IP_LIST_RAW
-    fi
-    [[ -z "$IP_LIST_RAW" ]] && { echo -e "${RED}IP 列表不能为空${NC}"; return 1; }
-
-    # 统一分隔符：逗号 -> 空格，压缩多空格
-    local IP_LIST
-    IP_LIST=$(echo "$IP_LIST_RAW" | tr ',' ' ' | tr -s ' ')
-
-    # 基础校验函数
-    is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-    is_ipv6() { [[ "$1" == *:* ]]; }
-
-    # 解析成数组（每个元素可为 ip 或 ip/prefix）
-    local IPS=()
-    for item in $IP_LIST; do
-        item=$(echo "$item" | tr -d '[:space:]')
-        [[ -z "$item" ]] && continue
-
-        local ip_part="$item"
-        local pfx_part=""
-
-        if [[ "$item" == */* ]]; then
-            ip_part="${item%%/*}"
-            pfx_part="${item##*/}"
-            [[ -z "$ip_part" || -z "$pfx_part" ]] && { echo -e "${RED}格式错误：$item${NC}"; return 1; }
-            [[ ! "$pfx_part" =~ ^[0-9]+$ ]] && { echo -e "${RED}前缀错误：$item${NC}"; return 1; }
-
-            if [[ "$ip_choice" == "1" && ( "$pfx_part" -lt 0 || "$pfx_part" -gt 32 ) ]]; then
-                echo -e "${RED}IPv4 前缀范围应为 0-32：$item${NC}"
-                return 1
-            fi
-            if [[ "$ip_choice" == "2" && ( "$pfx_part" -lt 0 || "$pfx_part" -gt 128 ) ]]; then
-                echo -e "${RED}IPv6 前缀范围应为 0-128：$item${NC}"
-                return 1
-            fi
-        else
-            # 用户没写 /prefix，则自动补默认 PREFIX
-            pfx_part="$PREFIX"
+        if [[ -z "$ip_input" ]]; then
+            echo -e "${RED}IPv6 不能为空${NC}"
+            return 1
         fi
 
-        # IP 基础校验
-        if [[ "$ip_choice" == "1" ]]; then
-            is_ipv4 "$ip_part" || { echo -e "${RED}IPv4 格式不正确：$ip_part${NC}"; return 1; }
+        if [[ "$ip_input" == */* ]]; then
+            ip_cidr="$ip_input"
         else
-            is_ipv6 "$ip_part" || { echo -e "${RED}IPv6 格式不正确：$ip_part${NC}"; return 1; }
+            read -p "请输入 IPv6 前缀 (0-128，回车默认 ${DEFAULT_PREFIX}): " prefix
+            [[ -z "$prefix" ]] && prefix="$DEFAULT_PREFIX"
+            if ! [[ "$prefix" =~ ^[0-9]+$ ]] || [[ "$prefix" -lt 0 || "$prefix" -gt 128 ]]; then
+                echo -e "${RED}IPv6 前缀必须是 0-128${NC}"
+                return 1
+            fi
+            ip_cidr="${ip_input}/${prefix}"
         fi
 
-        IPS+=("${ip_part}/${pfx_part}")
-    done
+        # 基本格式校验（IPv6 + 前缀）
+        if ! [[ "$ip_cidr" =~ ^[0-9a-fA-F:]+/[0-9]{1,3}$ ]]; then
+            echo -e "${RED}IPv6 CIDR 格式不正确！示例：2408:xxxx::100/64 或 2408:xxxx::100/128${NC}"
+            return 1
+        fi
+        prefix_part="${ip_cidr##*/}"
+        if ! [[ "$prefix_part" =~ ^[0-9]+$ ]] || [[ "$prefix_part" -lt 0 || "$prefix_part" -gt 128 ]]; then
+            echo -e "${RED}IPv6 前缀必须是 0-128${NC}"
+            return 1
+        fi
+    fi
 
-    [[ ${#IPS[@]} -eq 0 ]] && { echo -e "${RED}未解析到有效 IP${NC}"; return 1; }
+    su=''
+    [[ $EUID -ne 0 ]] && su='sudo'
 
-    echo
-    echo -e "${YELLOW}即将写入以下地址：${NC}"
-    for ipcidr in "${IPS[@]}"; do
-        echo -e "  ${GREEN}${ipcidr}${NC}"
-    done
-    echo -e "  网卡：${GREEN}${IFACE}${NC}  类型：${GREEN}${IP_FAMILY}${NC}  模式：${GREEN}${OP_MODE}${NC}"
+    echo -e "${BLUE}即将添加：${NC}${GREEN}${ip_cidr}${NC} -> 网卡 ${GREEN}${iface}${NC}"
     confirm_action || return 1
 
-    # 创建配置文件路径 /etc/network/interfaces.d/ 目录下
-    local INTERFACES_DIR="/etc/network/interfaces.d"
-    local FILE_NAME="${IFACE}_${IP_FAMILY}.cfg"
-    local CONFIG_FILE="$INTERFACES_DIR/$FILE_NAME"
+    # 4) 先临时生效（立刻可用）
+    if [[ "$ipver" == "1" ]]; then
+        $su ip addr add "$ip_cidr" dev "$iface" 2>/dev/null || {
+            echo -e "${RED}临时添加 IPv4 失败（可能已存在/冲突）${NC}"
+            return 1
+        }
+    else
+        $su ip -6 addr add "$ip_cidr" dev "$iface" 2>/dev/null || {
+            echo -e "${RED}临时添加 IPv6 失败（可能已存在/冲突）${NC}"
+            return 1
+        }
+    fi
+    log "已临时添加 IP: $ip_cidr dev=$iface"
 
-    # 确保配置文件目录存在
-    [ ! -d "$INTERFACES_DIR" ] && mkdir -p "$INTERFACES_DIR"
+    # 5) 持久化写入（按系统自动识别）
+    persisted=false
 
-    # 写入配置文件
-    {
-        echo "# === root.sh extra ips begin (${IFACE}/${IP_FAMILY}) ==="
-        echo "up ${CMD_FLUSH}"
-        for ipcidr in "${IPS[@]}"; do
-            echo "up ip addr add ${ipcidr} dev ${IFACE}"
-            echo "down ip addr del ${ipcidr} dev ${IFACE}"
-        done
-        echo "# === root.sh extra ips end (${IFACE}/${IP_FAMILY}) ==="
-    } > "$CONFIG_FILE"
+    # 5.1 NetworkManager（nmcli）
+    if command -v nmcli >/dev/null 2>&1; then
+        con_name=$(nmcli -t -f DEVICE,NAME con show --active 2>/dev/null | awk -F: -v d="$iface" '$1==d{print $2; exit}')
+        if [[ -n "$con_name" ]]; then
+            if [[ "$ipver" == "1" ]]; then
+                $su nmcli con mod "$con_name" +ipv4.addresses "$ip_cidr"
+                $su nmcli con mod "$con_name" ipv4.method manual >/dev/null 2>&1 || true
+            else
+                $su nmcli con mod "$con_name" +ipv6.addresses "$ip_cidr"
+                $su nmcli con mod "$con_name" ipv6.method manual >/dev/null 2>&1 || true
+            fi
+            persisted=true
+            log "已通过 NetworkManager 持久化：con=$con_name ip=$ip_cidr"
+        fi
+    fi
 
-    log "写入 IPv4/IPv6 地址配置到 $CONFIG_FILE"
+    # 5.2 Netplan（Ubuntu）
+    if ! $persisted && command -v netplan >/dev/null 2>&1 && [[ -d /etc/netplan ]]; then
+        yaml_file=$(ls -1 /etc/netplan/*.yaml /etc/netplan/*.yml 2>/dev/null | head -n1)
+        if [[ -n "$yaml_file" ]]; then
+            $su cp "$yaml_file" "${yaml_file}.bak.$(date +%F_%H%M%S)"
 
-    # 重启网络使配置生效
-    systemctl restart networking 2>/dev/null || service networking restart 2>/dev/null || true
+            if command -v python3 >/dev/null 2>&1 && python3 -c "import yaml" >/dev/null 2>&1; then
+                $su python3 - <<PY
+import yaml
+f = r"$yaml_file"
+iface = r"$iface"
+ip = r"$ip_cidr"
 
-    echo -e "${GREEN}完成。当前 ${IFACE} 地址：${NC}"
-    ip addr show dev "$IFACE"
-    echo
-    echo -e "${GREEN}当前 ${IFACE} IPv6 地址：${NC}"
-    ip -6 addr show dev "$IFACE"
+with open(f,'r',encoding='utf-8') as fp:
+    data = yaml.safe_load(fp) or {}
+
+net = data.setdefault('network', {})
+net.setdefault('version', 2)
+
+# 尽量放到 ethernets 里
+ethernets = net.setdefault('ethernets', {})
+if iface not in ethernets:
+    ethernets[iface] = {}
+
+addrs = ethernets[iface].setdefault('addresses', [])
+if ip not in addrs:
+    addrs.append(ip)
+
+with open(f,'w',encoding='utf-8') as fp:
+    yaml.safe_dump(data, fp, sort_keys=False, allow_unicode=True)
+PY
+                persisted=true
+                log "已通过 Netplan 持久化：file=$yaml_file iface=$iface ip=$ip_cidr"
+            else
+                echo -e "${YELLOW}检测到 Netplan，但系统缺少 python3-yaml（PyYAML）。已跳过 Netplan 持久化。${NC}"
+            fi
+        fi
+    fi
+
+    # 5.3 ifupdown（Debian/Ubuntu 老式 /etc/network/interfaces）
+    if ! $persisted && [[ -f /etc/network/interfaces ]]; then
+        $su cp /etc/network/interfaces "/etc/network/interfaces.bak.$(date +%F_%H%M%S)"
+
+        # 简单追加方式：写在 iface 对应段后面，如果找不到段就追加到文件末尾（不完美但可用）
+        if [[ "$ipver" == "1" ]]; then
+            addr_only="${ip_cidr%/*}"
+            prefix_only="${ip_cidr##*/}"
+            # /32 => netmask 255.255.255.255，其他前缀计算太复杂，这里仅对 /32 提供直接写法；否则仍追加一条 ip 命令到 up 指令
+            if [[ "$prefix_only" == "32" ]]; then
+                netmask="255.255.255.255"
+                $su bash -c "grep -q \"^iface $iface\" /etc/network/interfaces && \
+                    sed -i \"/^iface $iface/ a\\\n    up ip addr add $ip_cidr dev $iface\" /etc/network/interfaces || \
+                    echo -e \"\n# added by multi_ip_manager\nauto $iface\niface $iface inet manual\n    up ip addr add $ip_cidr dev $iface\" >> /etc/network/interfaces"
+            else
+                $su bash -c "grep -q \"^iface $iface\" /etc/network/interfaces && \
+                    sed -i \"/^iface $iface/ a\\\n    up ip addr add $ip_cidr dev $iface\" /etc/network/interfaces || \
+                    echo -e \"\n# added by multi_ip_manager\nauto $iface\niface $iface inet manual\n    up ip addr add $ip_cidr dev $iface\" >> /etc/network/interfaces"
+            fi
+        else
+            $su bash -c "grep -q \"^iface $iface\" /etc/network/interfaces && \
+                sed -i \"/^iface $iface/ a\\\n    up ip -6 addr add $ip_cidr dev $iface\" /etc/network/interfaces || \
+                echo -e \"\n# added by multi_ip_manager\nauto $iface\niface $iface inet6 manual\n    up ip -6 addr add $ip_cidr dev $iface\" >> /etc/network/interfaces"
+        fi
+
+        persisted=true
+        log "已通过 ifupdown 持久化：/etc/network/interfaces iface=$iface ip=$ip_cidr"
+    fi
+
+    # 5.4 systemd-networkd（/etc/systemd/network/*.network）
+    if ! $persisted && [[ -d /etc/systemd/network ]]; then
+        # 尝试找到匹配该网卡的 .network 文件（简单匹配 Name=）
+        nw_file=$(grep -rlE "^\s*Name\s*=\s*${iface}\s*$" /etc/systemd/network/*.network 2>/dev/null | head -n1)
+
+        # 如果没找到，就创建一个新的
+        if [[ -z "$nw_file" ]]; then
+            nw_file="/etc/systemd/network/99-${iface}.network"
+            $su tee "$nw_file" >/dev/null <<EOF
+[Match]
+Name=$iface
+
+[Network]
+EOF
+        else
+            $su cp "$nw_file" "${nw_file}.bak.$(date +%F_%H%M%S)"
+        fi
+
+        # 追加 Address=
+        if ! $su grep -qE "^\s*Address\s*=\s*${ip_cidr}\s*$" "$nw_file"; then
+            $su tee -a "$nw_file" >/dev/null <<EOF
+Address=$ip_cidr
+EOF
+        fi
+
+        persisted=true
+        log "已通过 systemd-networkd 持久化：file=$nw_file iface=$iface ip=$ip_cidr"
+    fi
+
+    if $persisted; then
+        echo -e "${GREEN}✅ 已写入持久化配置${NC}"
+    else
+        echo -e "${YELLOW}⚠️ 未找到可识别的持久化网络管理方式：仅临时生效（重启后可能丢失）${NC}"
+        log "持久化失败：系统网络栈未识别，仅临时生效"
+    fi
+
+    # 6) 重启网络（复用你已有的函数）
+    echo -e "${YELLOW}准备重启网络使配置完全生效...${NC}"
+    confirm_action || return 1
+    restart_all_interfaces
+
+    echo -e "${GREEN}完成！当前 $iface 地址如下：${NC}"
+    ip addr show dev "$iface"
+    log "多IP设置完成：iface=$iface ip=$ip_cidr"
 }
-
-
-
 
 # =========================================================
 # 主循环
@@ -1055,7 +1120,7 @@ while true; do
         10) restart_all_interfaces ;;
         11) gateway_manager ;;  # 新增的调用
         12) set_shortcut ;;
-        13) add_custom_ip ;;   # ✅ 新增：自定义添加 IPv4/IPv6 多IP
+        13) multi_ip_manager ;;   # ✅ 新增：自定义添加 IPv4/IPv6 多IP
         14)
             echo -e "${GREEN}已退出脚本，再见！${NC}"
             log "用户退出脚本"
