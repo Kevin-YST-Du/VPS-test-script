@@ -850,8 +850,8 @@ set_shortcut() {
 
 # =========================================================
 # 13. 自定义添加/替换 IPv4/IPv6 地址（写入 /etc/network/interfaces 并重启网络）
-# - add：可追加多个 IP（同网卡同协议写到同一个 block 里）
-# - replace：清除该 block 并重写（可选 flush）
+# - 支持一次输入多个 IP（空格/逗号分隔）
+# - 每个 IP 生成一条 up/down（符合 ip addr add 语法）
 # =========================================================
 add_custom_ip() {
     echo -e "${BLUE}===== 自定义添加/替换 IPv4/IPv6 地址（写入 interfaces） =====${NC}"
@@ -859,19 +859,13 @@ add_custom_ip() {
 
     [[ $EUID -ne 0 ]] && { echo -e "${RED}请使用 root 权限运行！${NC}"; return 1; }
 
-    # -------------------------
-    # 1) 自动识别网卡（排除 lo）
-    # -------------------------
     echo -e "${YELLOW}检测到以下网卡：${NC}"
     mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$')
-
-    if [[ ${#IFACES[@]} -eq 0 ]]; then
-        echo -e "${RED}未检测到可用网卡！${NC}"
-        return 1
-    fi
+    [[ ${#IFACES[@]} -eq 0 ]] && { echo -e "${RED}未检测到可用网卡！${NC}"; return 1; }
 
     local idx=1
     for nic in "${IFACES[@]}"; do
+        local state has_ip
         state=$(cat "/sys/class/net/${nic}/operstate" 2>/dev/null)
         has_ip=$(ip -o addr show dev "$nic" | wc -l)
         echo -e "${GREEN}${idx}.${NC} ${BLUE}${nic}${NC}  (state=${state}, addrs=${has_ip})"
@@ -886,16 +880,13 @@ add_custom_ip() {
     local IFACE="${IFACES[$((nic_choice-1))]}"
     echo -e "${GREEN}已选择网卡：${IFACE}${NC}"
 
-    # -------------------------
-    # 2) 选择 IPv4 / IPv6
-    # -------------------------
     echo
     echo -e "${GREEN}请选择要配置的 IP 类型：${NC}"
     echo -e "${GREEN}1. IPv4${NC}"
     echo -e "${GREEN}2. IPv6${NC}"
     read -p "请选择 [1-2]: " ip_choice
 
-    local DEFAULT_PREFIX IP_FAMILY CMD_ADD CMD_DEL CMD_FLUSH
+    local DEFAULT_PREFIX IP_FAMILY CMD_FLUSH
     if [[ "$ip_choice" == "1" ]]; then
         DEFAULT_PREFIX=32
         IP_FAMILY="inet"
@@ -909,13 +900,10 @@ add_custom_ip() {
         return 1
     fi
 
-    # -------------------------
-    # 3) 新增 / 替换
-    # -------------------------
     echo
     echo -e "${GREEN}请选择操作方式：${NC}"
-    echo -e "${GREEN}1. 新增（Add）— 在现有地址基础上增加一个 IP（支持多次追加）${NC}"
-    echo -e "${GREEN}2. 替换（Replace）— 覆盖本脚本写入的同网卡同协议记录${NC}"
+    echo -e "${GREEN}1. 新增（Add）— 追加（支持多条）${NC}"
+    echo -e "${GREEN}2. 替换（Replace）— 覆盖该网卡/协议的本脚本记录${NC}"
     read -p "请选择 [1-2]: " op_choice
 
     local OP_MODE
@@ -928,115 +916,129 @@ add_custom_ip() {
         return 1
     fi
 
-    # -------------------------
-    # 4) 输入 IP + 前缀（默认回车使用）
-    # -------------------------
-    local IPADDR PREFIX
-    if [[ "$ip_choice" == "1" ]]; then
-        read -p "请输入 IPv4 地址（例：203.0.113.10）: " IPADDR
-        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
-        [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
+    echo
+    read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
+    [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
 
-        [[ -z "$IPADDR" || -z "$PREFIX" ]] && { echo -e "${RED}IPv4 地址或前缀不能为空${NC}"; return 1; }
-        [[ ! "$PREFIX" =~ ^[0-9]+$ ]] && { echo -e "${RED}前缀必须是数字${NC}"; return 1; }
-        if (( PREFIX < 0 || PREFIX > 32 )); then
-            echo -e "${RED}IPv4 前缀范围应为 0-32${NC}"
-            return 1
-        fi
-        if ! [[ "$IPADDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-            echo -e "${RED}IPv4 格式不正确${NC}"
-            return 1
-        fi
-
-        CMD_ADD="ip addr add ${IPADDR}/${PREFIX} dev ${IFACE}"
-        CMD_DEL="ip addr del ${IPADDR}/${PREFIX} dev ${IFACE}"
-
-    else
-        read -p "请输入 IPv6 地址（例：2a0a:8dc0:fb:bbb9::11）: " IPADDR
-        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
-        [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
-
-        [[ -z "$IPADDR" || -z "$PREFIX" ]] && { echo -e "${RED}IPv6 地址或前缀不能为空${NC}"; return 1; }
-        [[ ! "$PREFIX" =~ ^[0-9]+$ ]] && { echo -e "${RED}前缀必须是数字${NC}"; return 1; }
-        if (( PREFIX < 0 || PREFIX > 128 )); then
-            echo -e "${RED}IPv6 前缀范围应为 0-128${NC}"
-            return 1
-        fi
-        if ! [[ "$IPADDR" =~ : ]]; then
-            echo -e "${RED}IPv6 格式看起来不正确（必须包含 :）${NC}"
-            return 1
-        fi
-
-        CMD_ADD="ip -6 addr add ${IPADDR}/${PREFIX} dev ${IFACE}"
-        CMD_DEL="ip -6 addr del ${IPADDR}/${PREFIX} dev ${IFACE}"
+    if [[ ! "$PREFIX" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}前缀必须是数字${NC}"
+        return 1
+    fi
+    if [[ "$ip_choice" == "1" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 32 ) ]]; then
+        echo -e "${RED}IPv4 前缀范围应为 0-32${NC}"
+        return 1
+    fi
+    if [[ "$ip_choice" == "2" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 128 ) ]]; then
+        echo -e "${RED}IPv6 前缀范围应为 0-128${NC}"
+        return 1
     fi
 
     echo
-    echo -e "${YELLOW}即将执行：${NC}"
-    echo -e "  网卡：${GREEN}${IFACE}${NC}"
-    echo -e "  类型：${GREEN}${IP_FAMILY}${NC}"
-    echo -e "  模式：${GREEN}${OP_MODE}${NC}"
-    echo -e "  地址：${GREEN}${IPADDR}/${PREFIX}${NC}"
+    echo -e "${YELLOW}支持输入多个 IP（空格或逗号分隔），可带或不带 /prefix。${NC}"
+    if [[ "$ip_choice" == "1" ]]; then
+        read -p "请输入 IPv4 地址列表（例：203.0.113.10,203.0.113.11/32 203.0.113.12）: " IP_LIST_RAW
+    else
+        read -p "请输入 IPv6 地址列表（例：2a0a:...:1,2a0a:...:2/64 2a0a:...:3）: " IP_LIST_RAW
+    fi
+    [[ -z "$IP_LIST_RAW" ]] && { echo -e "${RED}IP 列表不能为空${NC}"; return 1; }
+
+    # 统一分隔符：逗号 -> 空格，压缩多空格
+    local IP_LIST
+    IP_LIST=$(echo "$IP_LIST_RAW" | tr ',' ' ' | tr -s ' ')
+
+    # 解析成数组（每个元素可为 ip 或 ip/prefix）
+    local IPS=()
+    for item in $IP_LIST; do
+        item=$(echo "$item" | tr -d '[:space:]')
+        [[ -z "$item" ]] && continue
+        # 如果用户没写 /prefix，则自动补默认 PREFIX
+        if [[ "$item" == */* ]]; then
+            IPS+=("$item")
+        else
+            IPS+=("${item}/${PREFIX}")
+        fi
+    done
+
+    [[ ${#IPS[@]} -eq 0 ]] && { echo -e "${RED}未解析到有效 IP${NC}"; return 1; }
+
+    echo
+    echo -e "${YELLOW}即将写入以下地址：${NC}"
+    for ipcidr in "${IPS[@]}"; do
+        echo -e "  ${GREEN}${ipcidr}${NC}"
+    done
+    echo -e "  网卡：${GREEN}${IFACE}${NC}  类型：${GREEN}${IP_FAMILY}${NC}  模式：${GREEN}${OP_MODE}${NC}"
     confirm_action || return 1
 
-    # -------------------------
-    # 5) 写入 /etc/network/interfaces（支持追加多条）
-    # -------------------------
     local IF_FILE="/etc/network/interfaces"
     local MARK_BEGIN="# === root.sh extra ips begin (${IFACE}/${IP_FAMILY}) ==="
     local MARK_END="# === root.sh extra ips end (${IFACE}/${IP_FAMILY}) ==="
 
-    # 备份
     cp "$IF_FILE" "${IF_FILE}.bak.$(date +%F_%H%M%S)"
     log "已备份：${IF_FILE}"
 
-    # 便于 sed 匹配（转义特殊字符）
     local MB_ESC ME_ESC
     MB_ESC=$(printf '%s' "$MARK_BEGIN" | sed 's/[][\/.^$*]/\\&/g')
     ME_ESC=$(printf '%s' "$MARK_END"   | sed 's/[][\/.^$*]/\\&/g')
 
-    # 若为 replace：删掉旧 block 再重建
-    if [[ "$OP_MODE" == "replace" ]]; then
-        sed -i "/${MB_ESC}/,/${ME_ESC}/d" "$IF_FILE"
+    # 生成 up/down 行（每个 IP 一条命令，才是正确语法）
+    local LINES_UP=()
+    local LINES_DOWN=()
 
+    if [[ "$ip_choice" == "1" ]]; then
+        for ipcidr in "${IPS[@]}"; do
+            LINES_UP+=("up ip addr add ${ipcidr} dev ${IFACE}")
+            LINES_DOWN+=("down ip addr del ${ipcidr} dev ${IFACE}")
+        done
+    else
+        for ipcidr in "${IPS[@]}"; do
+            LINES_UP+=("up ip -6 addr add ${ipcidr} dev ${IFACE}")
+            LINES_DOWN+=("down ip -6 addr del ${ipcidr} dev ${IFACE}")
+        done
+    fi
+
+    if [[ "$OP_MODE" == "replace" ]]; then
+        # replace：删除旧 block，重建 block（保留 flush 行）
+        sed -i "/${MB_ESC}/,/${ME_ESC}/d" "$IF_FILE"
         {
             echo ""
             echo "$MARK_BEGIN"
             echo "up ${CMD_FLUSH}"
-            echo "up ${CMD_ADD}"
-            echo "down ${CMD_DEL}"
+            for l in "${LINES_UP[@]}"; do echo "$l"; done
+            for l in "${LINES_DOWN[@]}"; do echo "$l"; done
             echo "$MARK_END"
         } >> "$IF_FILE"
-
-        log "replace 写入：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
-
+        log "replace 写入：${IFACE} ${IP_FAMILY} ${IPS[*]}"
     else
-        # add 模式：如果 block 不存在 -> 新建 block
+        # add：block 不存在就新建；存在就逐条插入 END 前（并去重）
         if ! grep -qF "$MARK_BEGIN" "$IF_FILE"; then
             {
                 echo ""
                 echo "$MARK_BEGIN"
-                echo "up ${CMD_ADD}"
-                echo "down ${CMD_DEL}"
+                for l in "${LINES_UP[@]}"; do echo "$l"; done
+                for l in "${LINES_DOWN[@]}"; do echo "$l"; done
                 echo "$MARK_END"
             } >> "$IF_FILE"
-            log "add 新建 block：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
+            log "add 新建 block：${IFACE} ${IP_FAMILY} ${IPS[*]}"
         else
-            # block 存在：去重后插入到 END 前（实现多条追加）
-            if grep -qF "up ${CMD_ADD}" "$IF_FILE"; then
-                echo -e "${YELLOW}该地址已存在于 interfaces（重复），跳过写入。${NC}"
-                log "add 跳过重复：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
-            else
-                # 在 end 标记前插入两行
-                sed -i "/${ME_ESC}/i up ${CMD_ADD}\ndown ${CMD_DEL}" "$IF_FILE"
-                log "add 追加写入：${IFACE} ${IP_FAMILY} ${IPADDR}/${PREFIX}"
-            fi
+            # 逐条插入，避免重复
+            local i
+            for ((i=0; i<${#LINES_UP[@]}; i++)); do
+                local up_line="${LINES_UP[$i]}"
+                local down_line="${LINES_DOWN[$i]}"
+
+                if grep -qF "$up_line" "$IF_FILE"; then
+                    echo -e "${YELLOW}已存在，跳过：${up_line}${NC}"
+                    log "add 跳过重复：${up_line}"
+                    continue
+                fi
+
+                # 在 END 前插入两行（up + down）
+                sed -i "/${ME_ESC}/i ${up_line}\n${down_line}" "$IF_FILE"
+                log "add 追加写入：${up_line}"
+            done
         fi
     fi
 
-    # -------------------------
-    # 6) 重启网络生效
-    # -------------------------
     echo -e "${YELLOW}重启 networking 使配置生效...${NC}"
     systemctl restart networking 2>/dev/null || service networking restart 2>/dev/null || true
 
@@ -1046,7 +1048,6 @@ add_custom_ip() {
     echo -e "${GREEN}当前 ${IFACE} IPv6 地址：${NC}"
     ip -6 addr show dev "$IFACE"
 }
-
 
 # =========================================================
 # 主循环
