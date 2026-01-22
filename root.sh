@@ -89,15 +89,13 @@ display_menu() {
     echo -e "${GREEN}10. 重启所有网卡连接（自动识别系统）${NC}"
     echo -e "${GREEN}11. 切换/修复默认网关 (解决双网关冲突)${NC}"
     echo -e "${GREEN}12. 设置快捷启动键 (设置完自动生效)${NC}"
-    echo -e "${GREEN}13. 自定义添加 IPv4/IPv6 地址（多IP + 重启网络）${NC}"
-    echo -e "${GREEN}14. 退出${NC}"
+    echo -e "${GREEN}13. 退出${NC}"
 
     echo -e "${BLUE}=====================================${NC}"
     echo -e "${GREEN}日志文件位置：${NC} ${YELLOW}/root/root.log${NC}"
     echo -e "${YELLOW}快捷键已设置为r,下次运行输入r可快速启动此脚本${NC}"
     echo -e "${BLUE}=====================================${NC}"
-    read -p "请选择功能 [1-14]: " mu
-
+    read -p "请选择功能 [1-13]: " mu
 }
 
 # =========================================================
@@ -849,189 +847,6 @@ set_shortcut() {
 }
 
 # =========================================================
-# 13. Debian专用：自定义添加/替换 IPv4/IPv6 地址（多IP + 重启网络）
-# ✅ 写入 /etc/network/interfaces.d/root-extra-ips.cfg
-# ✅ 自动挂载到 /etc/network/interfaces (如果没有 include)
-# ✅ 支持 Add / Replace
-# ✅ 支持多个IP（空格/逗号）
-# =========================================================
-add_custom_ip() {
-    echo -e "${BLUE}===== Debian专用：自定义添加/替换 IPv4/IPv6 地址（多IP） =====${NC}"
-    confirm_action || return 1
-
-    [[ $EUID -ne 0 ]] && { echo -e "${RED}请使用 root 权限运行！${NC}"; return 1; }
-
-    local MAIN_IF="/etc/network/interfaces"
-    local DIR="/etc/network/interfaces.d"
-    local OUT_FILE="${DIR}/root-extra-ips.cfg"
-
-    mkdir -p "$DIR"
-
-    # ✅ 确保主配置包含 interfaces.d
-    if ! grep -qE '^\s*source\s+/etc/network/interfaces\.d/\*' "$MAIN_IF"; then
-        echo "source /etc/network/interfaces.d/*" >> "$MAIN_IF"
-        log "已自动在 $MAIN_IF 追加 include：source /etc/network/interfaces.d/*"
-    fi
-
-    echo -e "${YELLOW}检测到以下网卡：${NC}"
-    mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$')
-    [[ ${#IFACES[@]} -eq 0 ]] && { echo -e "${RED}未检测到可用网卡！${NC}"; return 1; }
-
-    local idx=1
-    for nic in "${IFACES[@]}"; do
-        local state has_ip
-        state=$(cat "/sys/class/net/${nic}/operstate" 2>/dev/null)
-        has_ip=$(ip -o addr show dev "$nic" | wc -l)
-        echo -e "${GREEN}${idx}.${NC} ${BLUE}${nic}${NC} (state=${state}, addrs=${has_ip})"
-        idx=$((idx+1))
-    done
-
-    read -p "请选择要配置的网卡 [1-${#IFACES[@]}]: " nic_choice
-    if ! [[ "$nic_choice" =~ ^[0-9]+$ ]] || (( nic_choice < 1 || nic_choice > ${#IFACES[@]} )); then
-        echo -e "${RED}无效选择${NC}"
-        return 1
-    fi
-    local IFACE="${IFACES[$((nic_choice-1))]}"
-    echo -e "${GREEN}已选择网卡：${IFACE}${NC}"
-
-    echo
-    echo -e "${GREEN}请选择 IP 类型：${NC}"
-    echo -e "${GREEN}1. IPv4${NC}"
-    echo -e "${GREEN}2. IPv6${NC}"
-    read -p "请选择 [1-2]: " ip_choice
-
-    local DEFAULT_PREFIX IP_FAMILY
-    if [[ "$ip_choice" == "1" ]]; then
-        DEFAULT_PREFIX=32
-        IP_FAMILY="inet"
-    elif [[ "$ip_choice" == "2" ]]; then
-        DEFAULT_PREFIX=64
-        IP_FAMILY="inet6"
-    else
-        echo -e "${RED}无效选择${NC}"
-        return 1
-    fi
-
-    echo
-    echo -e "${GREEN}请选择模式：${NC}"
-    echo -e "${GREEN}1. Add（追加）${NC}"
-    echo -e "${GREEN}2. Replace（替换，覆盖该协议的记录）${NC}"
-    read -p "请选择 [1-2]: " op_choice
-
-    local OP_MODE
-    if [[ "$op_choice" == "1" ]]; then
-        OP_MODE="add"
-    elif [[ "$op_choice" == "2" ]]; then
-        OP_MODE="replace"
-    else
-        echo -e "${RED}无效选择${NC}"
-        return 1
-    fi
-
-    echo
-    read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
-    [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
-
-    echo
-    echo -e "${YELLOW}支持多个 IP（空格/逗号分隔），可带或不带 /prefix${NC}"
-    if [[ "$ip_choice" == "1" ]]; then
-        read -p "请输入 IPv4 地址列表: " IP_LIST_RAW
-    else
-        read -p "请输入 IPv6 地址列表: " IP_LIST_RAW
-    fi
-    [[ -z "$IP_LIST_RAW" ]] && { echo -e "${RED}IP 列表不能为空${NC}"; return 1; }
-
-    local IP_LIST
-    IP_LIST=$(echo "$IP_LIST_RAW" | tr ',' ' ' | tr -s ' ')
-
-    # 基础校验
-    is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-    is_ipv6() { [[ "$1" == *:* ]]; }
-
-    local IPS=()
-    for item in $IP_LIST; do
-        item=$(echo "$item" | tr -d '[:space:]')
-        [[ -z "$item" ]] && continue
-
-        local ip_part="$item"
-        local pfx_part=""
-
-        if [[ "$item" == */* ]]; then
-            ip_part="${item%%/*}"
-            pfx_part="${item##*/}"
-        else
-            pfx_part="$PREFIX"
-        fi
-
-        if [[ "$ip_choice" == "1" ]]; then
-            is_ipv4 "$ip_part" || { echo -e "${RED}IPv4 格式错误：$ip_part${NC}"; return 1; }
-        else
-            is_ipv6 "$ip_part" || { echo -e "${RED}IPv6 格式错误：$ip_part${NC}"; return 1; }
-        fi
-
-        IPS+=("${ip_part}/${pfx_part}")
-    done
-
-    [[ ${#IPS[@]} -eq 0 ]] && { echo -e "${RED}未解析到有效 IP${NC}"; return 1; }
-
-    echo
-    echo -e "${YELLOW}即将写入：${NC}"
-    for ipcidr in "${IPS[@]}"; do
-        echo -e "  ${GREEN}${ipcidr}${NC}"
-    done
-    echo -e "  网卡：${GREEN}${IFACE}${NC}  类型：${GREEN}${IP_FAMILY}${NC}  模式：${GREEN}${OP_MODE}${NC}"
-    confirm_action || return 1
-
-    # ✅ 标记块（按协议区分）
-    local MARK_BEGIN="# === root.sh extra ips begin (${IFACE}/${IP_FAMILY}) ==="
-    local MARK_END="# === root.sh extra ips end (${IFACE}/${IP_FAMILY}) ==="
-
-    # ✅ 如果 replace：删除旧块
-    if [[ "$OP_MODE" == "replace" && -f "$OUT_FILE" ]]; then
-        sed -i "/$MARK_BEGIN/,/$MARK_END/d" "$OUT_FILE"
-    fi
-
-    # ✅ 如果 add：保留旧块（但去重）
-    touch "$OUT_FILE"
-
-    # ✅ 构造 up/down 行（Debian ifupdown 必须写在 iface block 内才能执行）
-    {
-        echo ""
-        echo "$MARK_BEGIN"
-        echo "# 注意：Debian ifupdown 会读取此文件，但这些 up/down 需要在 iface 生效时执行"
-        for ipcidr in "${IPS[@]}"; do
-            if [[ "$ip_choice" == "1" ]]; then
-                echo "up   ip addr add ${ipcidr} dev ${IFACE} || true"
-                echo "down ip addr del ${ipcidr} dev ${IFACE} || true"
-            else
-                echo "up   ip -6 addr add ${ipcidr} dev ${IFACE} || true"
-                echo "down ip -6 addr del ${ipcidr} dev ${IFACE} || true"
-            fi
-        done
-        echo "$MARK_END"
-    } >> "$OUT_FILE"
-
-    log "写入 extra IP 到：$OUT_FILE"
-
-    # ✅ 关键：把 up/down 挂载到 /etc/network/interfaces 的 iface 段中
-    # 这一步才是 Debian 真正生效点 ✅
-    if ! grep -q "source ${OUT_FILE}" "$MAIN_IF"; then
-        echo "" >> "$MAIN_IF"
-        echo "# root.sh extra ip loader" >> "$MAIN_IF"
-        echo "source ${OUT_FILE}" >> "$MAIN_IF"
-        log "已写入加载器：source ${OUT_FILE} -> $MAIN_IF"
-    fi
-
-    echo -e "${YELLOW}正在重启网络...${NC}"
-    systemctl restart networking 2>/dev/null || service networking restart 2>/dev/null || true
-
-    echo -e "${GREEN}完成。当前 ${IFACE} IP：${NC}"
-    ip addr show dev "$IFACE"
-    echo
-    ip -6 route show | head -n 10
-}
-
-# =========================================================
 # 主循环
 # =========================================================
 auto_add_shortcut_r
@@ -1052,16 +867,14 @@ while true; do
         10) restart_all_interfaces ;;
         11) gateway_manager ;;  # 新增的调用
         12) set_shortcut ;;
-        13) add_custom_ip ;;   # ✅ 新增：自定义添加 IPv4/IPv6 多IP
-        14)
+        13)
             echo -e "${GREEN}已退出脚本，再见！${NC}"
             log "用户退出脚本"
             exit 0
             ;;
         *)
-            echo -e "${RED}无效选择，请输入 1-14${NC}"
+            echo -e "${RED}无效选择，请输入 1-12${NC}"
             ;;
-
     esac
 
     echo
