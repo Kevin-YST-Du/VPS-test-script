@@ -849,215 +849,188 @@ set_shortcut() {
 }
 
 # =========================================================
-# 13. 多IP 配置管理（interfaces.d 方式，干净可回滚，IPv4/IPv6，新增/替换，批量IP）
-# - 不改动主 /etc/network/interfaces
-# - 写入 /etc/network/interfaces.d/multi-ip-<iface>.cfg
-# - 支持：选择网卡、选择 IPv4/IPv6、选择新增/替换、批量IP（空格/逗号）
-# - 不要求用户输入 CIDR：让用户选择默认 v4=/32 v6=/64 或自定义前缀
-# - 写完后重启网络（调用你已有 restart_all_interfaces）
+# 13. 自定义添加/替换 IPv4/IPv6 地址（写入 /etc/network/interfaces.d 并重启网络）
+# - 支持一次输入多个 IP（空格/逗号分隔）
+# - 每个 IP 生成一条 up/down（符合 ip addr add 语法）
+# - 修复：sed 插入时不使用 \n，避免不同系统 sed 行为不一致
+# - 增强：基础校验 IPv4/IPv6 格式（防止把脏数据写进 interfaces）
 # =========================================================
 add_custom_ip() {
-    echo -e "${BLUE}===== 多IP 配置管理 (interfaces.d) =====${NC}"
+    echo -e "${BLUE}===== 自定义添加/替换 IPv4/IPv6 地址（写入 interfaces.d） =====${NC}"
     confirm_action || return 1
 
-    su=''
-    [[ $EUID -ne 0 ]] && su='sudo'
+    [[ $EUID -ne 0 ]] && { echo -e "${RED}请使用 root 权限运行！${NC}"; return 1; }
 
-    # 1) 选择 IPv4 / IPv6
-    echo -e "${GREEN}1. 配置 IPv4 地址${NC}"
-    echo -e "${GREEN}2. 配置 IPv6 地址${NC}"
-    read -p "请选择 [1-2]: " ip_ver
-    if [[ "$ip_ver" == "1" ]]; then
+    echo -e "${YELLOW}检测到以下网卡：${NC}"
+    mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$')
+    [[ ${#IFACES[@]} -eq 0 ]] && { echo -e "${RED}未检测到可用网卡！${NC}"; return 1; }
+
+    local idx=1
+    for nic in "${IFACES[@]}"; do
+        local state has_ip
+        state=$(cat "/sys/class/net/${nic}/operstate" 2>/dev/null)
+        has_ip=$(ip -o addr show dev "$nic" | wc -l)
+        echo -e "${GREEN}${idx}.${NC} ${BLUE}${nic}${NC}  (state=${state}, addrs=${has_ip})"
+        idx=$((idx+1))
+    done
+
+    read -p "请选择要配置的网卡 [1-${#IFACES[@]}]: " nic_choice
+    if ! [[ "$nic_choice" =~ ^[0-9]+$ ]] || (( nic_choice < 1 || nic_choice > ${#IFACES[@]} )); then
+        echo -e "${RED}无效选择${NC}"
+        return 1
+    fi
+    local IFACE="${IFACES[$((nic_choice-1))]}"
+    echo -e "${GREEN}已选择网卡：${IFACE}${NC}"
+
+    echo
+    echo -e "${GREEN}请选择要配置的 IP 类型：${NC}"
+    echo -e "${GREEN}1. IPv4${NC}"
+    echo -e "${GREEN}2. IPv6${NC}"
+    read -p "请选择 [1-2]: " ip_choice
+
+    local DEFAULT_PREFIX IP_FAMILY CMD_FLUSH
+    if [[ "$ip_choice" == "1" ]]; then
+        DEFAULT_PREFIX=32
         IP_FAMILY="inet"
-        DEFAULT_PREFIX="32"
-    elif [[ "$ip_ver" == "2" ]]; then
+        CMD_FLUSH="ip -4 addr flush dev ${IFACE} scope global"
+    elif [[ "$ip_choice" == "2" ]]; then
+        DEFAULT_PREFIX=64
         IP_FAMILY="inet6"
-        DEFAULT_PREFIX="64"
+        CMD_FLUSH="ip -6 addr flush dev ${IFACE} scope global"
     else
         echo -e "${RED}无效选择${NC}"
         return 1
     fi
 
-    # 2) 检测网卡并让用户选择
-    echo -e "${YELLOW}可用网卡列表：${NC}"
-    mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|tap)')
-    if [[ ${#IFACES[@]} -eq 0 ]]; then
-        echo -e "${RED}未检测到可用网卡${NC}"
-        return 1
-    fi
+    echo
+    echo -e "${GREEN}请选择操作方式：${NC}"
+    echo -e "${GREEN}1. 新增（Add）— 追加（支持多条）${NC}"
+    echo -e "${GREEN}2. 替换（Replace）— 覆盖该网卡/协议的本脚本记录${NC}"
+    read -p "请选择 [1-2]: " op_choice
 
-    i=1
-    declare -a IF_ARR
-    for iface in "${IFACES[@]}"; do
-        echo -e "${GREEN}${i}. ${iface}${NC}"
-        IF_ARR[$i]="$iface"
-        ((i++))
-    done
-    read -p "请选择网卡 [1-$((i-1))]: " if_choice
-    DEV="${IF_ARR[$if_choice]}"
-    [[ -z "$DEV" ]] && { echo -e "${RED}无效网卡选择${NC}"; return 1; }
-
-    # 3) 选择 新增 / 替换
-    echo -e "${GREEN}1. 新增（保留该接口现有 multi-ip 配置，并追加）${NC}"
-    echo -e "${GREEN}2. 替换（覆盖该接口现有 multi-ip 配置）${NC}"
-    read -p "请选择 [1-2]: " mode
-    if [[ "$mode" != "1" && "$mode" != "2" ]]; then
-        echo -e "${RED}无效选择${NC}"
-        return 1
-    fi
-
-    # 4) 前缀选择：默认 or 自定义
-    echo -e "${YELLOW}前缀长度选择：${NC}"
-    echo -e "${GREEN}1. 使用默认前缀：IPv4 /${DEFAULT_PREFIX} 或 IPv6 /${DEFAULT_PREFIX}${NC}"
-    echo -e "${GREEN}2. 自定义前缀长度${NC}"
-    read -p "请选择 [1-2]: " pre_choice
-    if [[ "$pre_choice" == "1" ]]; then
-        PREFIX="$DEFAULT_PREFIX"
-    elif [[ "$pre_choice" == "2" ]]; then
-        read -p "请输入前缀长度（IPv4 0-32 / IPv6 0-128）: " PREFIX
-        if [[ ! "$PREFIX" =~ ^[0-9]+$ ]]; then
-            echo -e "${RED}前缀必须是数字${NC}"
-            return 1
-        fi
-        if [[ "$ip_ver" == "1" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 32 ) ]]; then
-            echo -e "${RED}IPv4 前缀必须 0-32${NC}"
-            return 1
-        fi
-        if [[ "$ip_ver" == "2" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 128 ) ]]; then
-            echo -e "${RED}IPv6 前缀必须 0-128${NC}"
-            return 1
-        fi
+    local OP_MODE
+    if [[ "$op_choice" == "1" ]]; then
+        OP_MODE="add"
+    elif [[ "$op_choice" == "2" ]]; then
+        OP_MODE="replace"
     else
         echo -e "${RED}无效选择${NC}"
         return 1
     fi
 
-    # 5) 输入 IP（批量：空格或逗号分隔）
-    echo -e "${YELLOW}请输入要设置的 IP（不需要写 /前缀），支持批量：空格或逗号分隔${NC}"
-    read -p "例如：1.1.1.1,2.2.2.2 或 2001:db8::1 2001:db8::2 : " RAW_IPS
-    [[ -z "$RAW_IPS" ]] && { echo -e "${RED}IP 不能为空${NC}"; return 1; }
+    echo
+    read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，回车使用默认）: " PREFIX
+    [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
 
-    CLEANED=$(echo "$RAW_IPS" | tr ',' ' ' | tr -s ' ')
-    declare -a IPS=()
-    for item in $CLEANED; do
-        # 基础过滤：不能包含 /
+    if [[ ! "$PREFIX" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}前缀必须是数字${NC}"
+        return 1
+    fi
+    if [[ "$ip_choice" == "1" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 32 ) ]]; then
+        echo -e "${RED}IPv4 前缀范围应为 0-32${NC}"
+        return 1
+    fi
+    if [[ "$ip_choice" == "2" && ( "$PREFIX" -lt 0 || "$PREFIX" -gt 128 ) ]]; then
+        echo -e "${RED}IPv6 前缀范围应为 0-128${NC}"
+        return 1
+    fi
+
+    echo
+    echo -e "${YELLOW}支持输入多个 IP（空格或逗号分隔），可带或不带 /prefix。${NC}"
+    if [[ "$ip_choice" == "1" ]]; then
+        read -p "请输入 IPv4 地址列表（例：203.0.113.10,203.0.113.11/32 203.0.113.12）: " IP_LIST_RAW
+    else
+        read -p "请输入 IPv6 地址列表（例：2a0a:...:1,2a0a:...:2/64 2a0a:...:3）: " IP_LIST_RAW
+    fi
+    [[ -z "$IP_LIST_RAW" ]] && { echo -e "${RED}IP 列表不能为空${NC}"; return 1; }
+
+    # 统一分隔符：逗号 -> 空格，压缩多空格
+    local IP_LIST
+    IP_LIST=$(echo "$IP_LIST_RAW" | tr ',' ' ' | tr -s ' ')
+
+    # 基础校验函数
+    is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+    is_ipv6() { [[ "$1" == *:* ]]; }
+
+    # 解析成数组（每个元素可为 ip 或 ip/prefix）
+    local IPS=()
+    for item in $IP_LIST; do
+        item=$(echo "$item" | tr -d '[:space:]')
+        [[ -z "$item" ]] && continue
+
+        local ip_part="$item"
+        local pfx_part=""
+
         if [[ "$item" == */* ]]; then
-            echo -e "${RED}不要包含 /前缀：$item${NC}"
-            return 1
+            ip_part="${item%%/*}"
+            pfx_part="${item##*/}"
+            [[ -z "$ip_part" || -z "$pfx_part" ]] && { echo -e "${RED}格式错误：$item${NC}"; return 1; }
+            [[ ! "$pfx_part" =~ ^[0-9]+$ ]] && { echo -e "${RED}前缀错误：$item${NC}"; return 1; }
+
+            if [[ "$ip_choice" == "1" && ( "$pfx_part" -lt 0 || "$pfx_part" -gt 32 ) ]]; then
+                echo -e "${RED}IPv4 前缀范围应为 0-32：$item${NC}"
+                return 1
+            fi
+            if [[ "$ip_choice" == "2" && ( "$pfx_part" -lt 0 || "$pfx_part" -gt 128 ) ]]; then
+                echo -e "${RED}IPv6 前缀范围应为 0-128：$item${NC}"
+                return 1
+            fi
+        else
+            # 用户没写 /prefix，则自动补默认 PREFIX
+            pfx_part="$PREFIX"
         fi
-        # 简单校验（不做强校验，避免误伤）；至少包含 . 或 :
-        if [[ "$ip_ver" == "1" && "$item" != *.* ]]; then
-            echo -e "${RED}看起来不是 IPv4：$item${NC}"
-            return 1
+
+        # IP 基础校验
+        if [[ "$ip_choice" == "1" ]]; then
+            is_ipv4 "$ip_part" || { echo -e "${RED}IPv4 格式不正确：$ip_part${NC}"; return 1; }
+        else
+            is_ipv6 "$ip_part" || { echo -e "${RED}IPv6 格式不正确：$ip_part${NC}"; return 1; }
         fi
-        if [[ "$ip_ver" == "2" && "$item" != *:* ]]; then
-            echo -e "${RED}看起来不是 IPv6：$item${NC}"
-            return 1
-        fi
-        IPS+=("$item")
+
+        IPS+=("${ip_part}/${pfx_part}")
     done
 
-    # 6) interfaces.d 文件路径
-    CFG_DIR="/etc/network/interfaces.d"
-    CFG_FILE="${CFG_DIR}/multi-ip-${DEV}.cfg"
-    BACKUP_FILE="${CFG_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
+    [[ ${#IPS[@]} -eq 0 ]] && { echo -e "${RED}未解析到有效 IP${NC}"; return 1; }
 
-    echo -e "${BLUE}将写入：${YELLOW}${CFG_FILE}${NC}"
-    echo -e "${YELLOW}模式：$([[ "$mode" == "1" ]] && echo "新增(追加)" || echo "替换(覆盖)")${NC}"
-    echo -e "${YELLOW}地址族：${IP_FAMILY}  前缀：/${PREFIX}${NC}"
-    echo -e "${GREEN}IP 列表：${IPS[*]}${NC}"
+    echo
+    echo -e "${YELLOW}即将写入以下地址：${NC}"
+    for ipcidr in "${IPS[@]}"; do
+        echo -e "  ${GREEN}${ipcidr}${NC}"
+    done
+    echo -e "  网卡：${GREEN}${IFACE}${NC}  类型：${GREEN}${IP_FAMILY}${NC}  模式：${GREEN}${OP_MODE}${NC}"
     confirm_action || return 1
 
-    # 7) 确保目录存在
-    $su mkdir -p "$CFG_DIR"
+    # 创建配置文件路径 /etc/network/interfaces.d/ 目录下
+    local INTERFACES_DIR="/etc/network/interfaces.d"
+    local FILE_NAME="${IFACE}_${IP_FAMILY}.cfg"
+    local CONFIG_FILE="$INTERFACES_DIR/$FILE_NAME"
 
-    # 8) 若文件存在，先备份
-    if $su test -f "$CFG_FILE"; then
-        $su cp -a "$CFG_FILE" "$BACKUP_FILE"
-        log "备份旧配置：$CFG_FILE -> $BACKUP_FILE"
-    fi
+    # 确保配置文件目录存在
+    [ ! -d "$INTERFACES_DIR" ] && mkdir -p "$INTERFACES_DIR"
 
-    # 9) 生成要写入的内容（按别名方式：iface <dev> inet/inet6 static + up ip addr add ...）
-    #    这样不会影响主 DHCP/static 配置，仅追加地址；也更易回滚（删这个文件即可）
-    gen_block() {
-        local fam="$1"
-        local pref="$2"
-        shift 2
-        local -a iplist=("$@")
-
-        echo "# ========================================================="
-        echo "# Managed by server script: multi_ip_manager"
-        echo "# Device: $DEV"
-        echo "# Family: $fam"
-        echo "# Prefix: /$pref"
-        echo "# Date: $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "# Rollback: remove this file and restart networking"
-        echo "# ========================================================="
-        echo
-        echo "auto ${DEV}"
-        echo "iface ${DEV} ${fam} static"
-        echo "    address 0.0.0.0"  # 占位，避免 ifupdown 报错（对 inet6 也无害）
-        echo "    netmask 255.255.255.255"  # 占位（对 inet6 也无害）
-        echo
-        for ip in "${iplist[@]}"; do
-            if [[ "$fam" == "inet" ]]; then
-                echo "    up ip -4 addr add ${ip}/${pref} dev ${DEV} || true"
-                echo "    down ip -4 addr del ${ip}/${pref} dev ${DEV} || true"
-            else
-                echo "    up ip -6 addr add ${ip}/${pref} dev ${DEV} || true"
-                echo "    down ip -6 addr del ${ip}/${pref} dev ${DEV} || true"
-            fi
+    # 写入配置文件
+    {
+        echo "# === root.sh extra ips begin (${IFACE}/${IP_FAMILY}) ==="
+        echo "up ${CMD_FLUSH}"
+        for ipcidr in "${IPS[@]}"; do
+            echo "up ip addr add ${ipcidr} dev ${IFACE}"
+            echo "down ip addr del ${ipcidr} dev ${IFACE}"
         done
-        echo
-    }
+        echo "# === root.sh extra ips end (${IFACE}/${IP_FAMILY}) ==="
+    } > "$CONFIG_FILE"
 
-    # 10) 写入策略：替换=覆盖；新增=在文件末尾追加一个新 block（并保留旧内容）
-    if [[ "$mode" == "2" ]]; then
-        tmpf="$(mktemp)"
-        gen_block "$IP_FAMILY" "$PREFIX" "${IPS[@]}" > "$tmpf"
-        $su install -m 0644 "$tmpf" "$CFG_FILE"
-        rm -f "$tmpf"
-        log "写入(替换) interfaces.d 配置：$CFG_FILE"
-    else
-        tmpf="$(mktemp)"
-        gen_block "$IP_FAMILY" "$PREFIX" "${IPS[@]}" > "$tmpf"
-        # 若原文件不存在，直接安装；存在则追加
-        if $su test -f "$CFG_FILE"; then
-            $su bash -c "cat '$tmpf' >> '$CFG_FILE'"
-        else
-            $su install -m 0644 "$tmpf" "$CFG_FILE"
-        fi
-        rm -f "$tmpf"
-        log "写入(新增追加) interfaces.d 配置：$CFG_FILE"
-    fi
+    log "写入 IPv4/IPv6 地址配置到 $CONFIG_FILE"
 
-    # 11) 确保主 interfaces 包含 interfaces.d（不修改主内容结构，若没有才追加一行 include）
-    #     Debian/Ubuntu ifupdown 通常已有 "source /etc/network/interfaces.d/*"
-    #     我们仅在缺失时追加（尽量不“搞乱”）
-    if $su test -f /etc/network/interfaces; then
-        if ! $su grep -qE '^[[:space:]]*(source|source-directory)[[:space:]]+/etc/network/interfaces\.d/' /etc/network/interfaces; then
-            echo -e "${YELLOW}检测到主 /etc/network/interfaces 未包含 interfaces.d，引入一行 source...${NC}"
-            confirm_action || return 1
-            $su bash -c "echo '' >> /etc/network/interfaces"
-            $su bash -c "echo '# include per-interface configs' >> /etc/network/interfaces"
-            $su bash -c "echo 'source /etc/network/interfaces.d/*' >> /etc/network/interfaces"
-            log "主 interfaces 已追加 source /etc/network/interfaces.d/*"
-        fi
-    fi
+    # 重启网络使配置生效
+    systemctl restart networking 2>/dev/null || service networking restart 2>/dev/null || true
 
-    # 12) 重启网络
-    echo -e "${GREEN}配置写入完成，正在重启网络...${NC}"
-    restart_all_interfaces
-
-    echo -e "${YELLOW}当前 ${DEV} 地址：${NC}"
-    if [[ "$ip_ver" == "1" ]]; then
-        ip -4 addr show dev "$DEV"
-    else
-        ip -6 addr show dev "$DEV"
-    fi
-
-    echo -e "${GREEN}完成！回滚方式：删除 ${CFG_FILE}（或用备份恢复），然后重启网络。${NC}"
+    echo -e "${GREEN}完成。当前 ${IFACE} 地址：${NC}"
+    ip addr show dev "$IFACE"
+    echo
+    echo -e "${GREEN}当前 ${IFACE} IPv6 地址：${NC}"
+    ip -6 addr show dev "$IFACE"
 }
+
 
 
 
