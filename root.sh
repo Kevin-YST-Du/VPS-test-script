@@ -849,15 +849,17 @@ set_shortcut() {
 }
 
 # =========================================================
-# 13. 自定义添加 IPv4/IPv6 地址（写入 interfaces.d 并重启网络）
+# 13. 自定义添加/替换 IPv4/IPv6 地址（写入 interfaces.d 并重启网络）
 # =========================================================
 add_custom_ip() {
-    echo -e "${BLUE}===== 自定义添加 IPv4/IPv6 地址（多IP） =====${NC}"
+    echo -e "${BLUE}===== 自定义添加/替换 IPv4/IPv6 地址（多IP） =====${NC}"
     confirm_action || return 1
 
     [[ $EUID -ne 0 ]] && { echo -e "${RED}请使用 root 权限运行！${NC}"; return 1; }
 
-        # 自动识别网卡（排除 lo）
+    # -------------------------
+    # 1) 自动识别网卡（排除 lo）
+    # -------------------------
     echo -e "${YELLOW}检测到以下网卡：${NC}"
     mapfile -t IFACES < <(ip -o link show | awk -F': ' '{print $2}' | grep -v '^lo$')
 
@@ -868,7 +870,7 @@ add_custom_ip() {
 
     local idx=1
     for nic in "${IFACES[@]}"; do
-        # 尝试显示网卡是否 UP + 是否有 IP（给用户参考）
+        local state has_ip
         state=$(cat "/sys/class/net/${nic}/operstate" 2>/dev/null)
         has_ip=$(ip -o addr show dev "$nic" | wc -l)
         echo -e "${GREEN}${idx}.${NC} ${BLUE}${nic}${NC}  (state=${state}, addrs=${has_ip})"
@@ -880,19 +882,59 @@ add_custom_ip() {
         echo -e "${RED}无效选择${NC}"
         return 1
     fi
-    IFACE="${IFACES[$((nic_choice-1))]}"
+    local IFACE="${IFACES[$((nic_choice-1))]}"
     echo -e "${GREEN}已选择网卡：${IFACE}${NC}"
 
-
-    echo -e "${GREEN}请选择要添加的 IP 类型：${NC}"
+    # -------------------------
+    # 2) 选择 IPv4 / IPv6
+    # -------------------------
+    echo
+    echo -e "${GREEN}请选择要配置的 IP 类型：${NC}"
     echo -e "${GREEN}1. IPv4${NC}"
     echo -e "${GREEN}2. IPv6${NC}"
     read -p "请选择 [1-2]: " ip_choice
 
+    local DEFAULT_PREFIX IP_FAMILY CMD_ADD CMD_DEL CMD_FLUSH
+    if [[ "$ip_choice" == "1" ]]; then
+        DEFAULT_PREFIX=32
+        IP_FAMILY="inet"
+        CMD_FLUSH="ip -4 addr flush dev ${IFACE} scope global"
+    elif [[ "$ip_choice" == "2" ]]; then
+        DEFAULT_PREFIX=64
+        IP_FAMILY="inet6"
+        CMD_FLUSH="ip -6 addr flush dev ${IFACE} scope global"
+    else
+        echo -e "${RED}无效选择${NC}"
+        return 1
+    fi
+
+    # -------------------------
+    # 3) 选择“新增”还是“替换”
+    # -------------------------
+    echo
+    echo -e "${GREEN}请选择操作方式：${NC}"
+    echo -e "${GREEN}1. 新增（Add）— 在现有地址基础上增加一个 IP${NC}"
+    echo -e "${GREEN}2. 替换（Replace）— 清除该协议现有全局地址，仅保留你设置的 IP${NC}"
+    read -p "请选择 [1-2]: " op_choice
+
+    local OP_MODE
+    if [[ "$op_choice" == "1" ]]; then
+        OP_MODE="add"
+    elif [[ "$op_choice" == "2" ]]; then
+        OP_MODE="replace"
+    else
+        echo -e "${RED}无效选择${NC}"
+        return 1
+    fi
+
+    # -------------------------
+    # 4) 输入 IP + 前缀（默认回车使用）
+    # -------------------------
     local IPADDR PREFIX
     if [[ "$ip_choice" == "1" ]]; then
         read -p "请输入 IPv4 地址（例：203.0.113.10）: " IPADDR
-        read -p "请输入前缀长度（例：24；等价 255.255.255.0）: " PREFIX
+        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，直接回车使用默认）: " PREFIX
+        [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
 
         [[ -z "$IPADDR" || -z "$PREFIX" ]] && { echo -e "${RED}IPv4 地址或前缀不能为空${NC}"; return 1; }
         [[ ! "$PREFIX" =~ ^[0-9]+$ ]] && { echo -e "${RED}前缀必须是数字${NC}"; return 1; }
@@ -900,20 +942,18 @@ add_custom_ip() {
             echo -e "${RED}IPv4 前缀范围应为 0-32${NC}"
             return 1
         fi
-
-        # 简单校验 IPv4 格式
         if ! [[ "$IPADDR" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
             echo -e "${RED}IPv4 格式不正确${NC}"
             return 1
         fi
 
-        IP_FAMILY="inet"
         CMD_ADD="ip addr add ${IPADDR}/${PREFIX} dev ${IFACE}"
         CMD_DEL="ip addr del ${IPADDR}/${PREFIX} dev ${IFACE}"
 
-    elif [[ "$ip_choice" == "2" ]]; then
-        read -p "请输入 IPv6 地址（例：2a0a:8dc0:fb:1::11）: " IPADDR
-        read -p "请输入前缀长度（例：64）: " PREFIX
+    else
+        read -p "请输入 IPv6 地址（例：2a0a:8dc0:fb:bbb9::11）: " IPADDR
+        read -p "请输入前缀长度（默认 ${DEFAULT_PREFIX}，直接回车使用默认）: " PREFIX
+        [[ -z "$PREFIX" ]] && PREFIX="$DEFAULT_PREFIX"
 
         [[ -z "$IPADDR" || -z "$PREFIX" ]] && { echo -e "${RED}IPv6 地址或前缀不能为空${NC}"; return 1; }
         [[ ! "$PREFIX" =~ ^[0-9]+$ ]] && { echo -e "${RED}前缀必须是数字${NC}"; return 1; }
@@ -921,75 +961,93 @@ add_custom_ip() {
             echo -e "${RED}IPv6 前缀范围应为 0-128${NC}"
             return 1
         fi
-
-        # 简单校验：包含冒号（不做过度严格验证，避免误伤合法写法）
         if ! [[ "$IPADDR" =~ : ]]; then
             echo -e "${RED}IPv6 格式看起来不正确（必须包含 :）${NC}"
             return 1
         fi
 
-        IP_FAMILY="inet6"
         CMD_ADD="ip -6 addr add ${IPADDR}/${PREFIX} dev ${IFACE}"
         CMD_DEL="ip -6 addr del ${IPADDR}/${PREFIX} dev ${IFACE}"
-
-    else
-        echo -e "${RED}无效选择${NC}"
-        return 1
     fi
 
     echo
-    echo -e "${YELLOW}即将添加：${NC}"
+    echo -e "${YELLOW}即将执行：${NC}"
     echo -e "  网卡：${GREEN}${IFACE}${NC}"
+    echo -e "  类型：${GREEN}${IP_FAMILY}${NC}"
+    echo -e "  模式：${GREEN}${OP_MODE}${NC}"
     echo -e "  地址：${GREEN}${IPADDR}/${PREFIX}${NC}"
     confirm_action || return 1
 
-    # 采用 interfaces.d 保存额外 IP，避免污染主文件
+    # -------------------------
+    # 5) 写入 interfaces.d 配置
+    # -------------------------
     local MAIN_IF="/etc/network/interfaces"
     local IF_DIR="/etc/network/interfaces.d"
     local EXTRA_FILE="${IF_DIR}/extra-ips-${IFACE}.cfg"
 
     mkdir -p "$IF_DIR"
 
-    # 确保主 interfaces 有 source 指令（Debian 默认有，但很多人删了）
+    # 确保主 interfaces 有 source 指令
     if ! grep -qE '^[[:space:]]*source[[:space:]]+/etc/network/interfaces\.d/\*' "$MAIN_IF" 2>/dev/null; then
         echo "" >> "$MAIN_IF"
         echo "source /etc/network/interfaces.d/*" >> "$MAIN_IF"
         log "已在 $MAIN_IF 写入 source /etc/network/interfaces.d/*"
     fi
 
-    # 写入一段干净的“额外地址”配置（按网卡分文件）
-    if [[ ! -f "$EXTRA_FILE" ]]; then
+    # 如果是 replace：重建文件（只保留本次设置 + flush）
+    if [[ "$OP_MODE" == "replace" ]]; then
         cat > "$EXTRA_FILE" <<EOF
+# Auto-generated by root.sh
+# Extra IPs for ${IFACE} (${IP_FAMILY}) - REPLACE MODE
+
+auto ${IFACE}
+iface ${IFACE} ${IP_FAMILY} manual
+    # Replace mode: flush existing global addresses for this family
+    up ${CMD_FLUSH}
+    up ${CMD_ADD}
+    down ${CMD_DEL}
+EOF
+        echo -e "${GREEN}已写入（替换模式）：${EXTRA_FILE}${NC}"
+        log "替换模式写入：iface=${IFACE}, family=${IP_FAMILY}, ip=${IPADDR}/${PREFIX}"
+
+    else
+        # add：如果文件不存在先初始化
+        if [[ ! -f "$EXTRA_FILE" ]]; then
+            cat > "$EXTRA_FILE" <<EOF
 # Auto-generated by root.sh
 # Extra IPs for ${IFACE}
 
 auto ${IFACE}
 iface ${IFACE} ${IP_FAMILY} manual
 EOF
-        log "创建 extra 配置文件：$EXTRA_FILE"
+            log "创建 extra 配置文件：$EXTRA_FILE"
+        fi
+
+        # 去重写入
+        if grep -qF "${IPADDR}/${PREFIX}" "$EXTRA_FILE"; then
+            echo -e "${YELLOW}该地址已存在于 ${EXTRA_FILE}，跳过写入。${NC}"
+            log "跳过重复地址写入：${IPADDR}/${PREFIX} -> ${EXTRA_FILE}"
+        else
+            echo "    up ${CMD_ADD}" >> "$EXTRA_FILE"
+            echo "    down ${CMD_DEL}" >> "$EXTRA_FILE"
+            echo -e "${GREEN}已写入（新增模式）：${EXTRA_FILE}${NC}"
+            log "新增模式写入：iface=${IFACE}, family=${IP_FAMILY}, ip=${IPADDR}/${PREFIX}"
+        fi
     fi
 
-    # 防止重复：如果已存在同样的地址，就不重复写
-    if grep -qF "${IPADDR}/${PREFIX}" "$EXTRA_FILE"; then
-        echo -e "${YELLOW}该地址已存在于 ${EXTRA_FILE}，跳过写入。${NC}"
-        log "跳过重复地址写入：${IPADDR}/${PREFIX} -> ${EXTRA_FILE}"
-    else
-        echo "    up ${CMD_ADD}" >> "$EXTRA_FILE"
-        echo "    down ${CMD_DEL}" >> "$EXTRA_FILE"
-        log "写入额外地址：${IPADDR}/${PREFIX} -> ${EXTRA_FILE}"
-        echo -e "${GREEN}已写入配置：${EXTRA_FILE}${NC}"
-    fi
-
+    # -------------------------
+    # 6) 重启网络生效
+    # -------------------------
     echo -e "${YELLOW}重启 networking 使配置生效...${NC}"
     systemctl restart networking 2>/dev/null || service networking restart 2>/dev/null || true
 
     echo -e "${GREEN}完成。当前 ${IFACE} 地址：${NC}"
     ip addr show dev "$IFACE"
     echo
-    echo -e "${GREEN}IPv6 地址：${NC}"
+    echo -e "${GREEN}当前 ${IFACE} IPv6 地址：${NC}"
     ip -6 addr show dev "$IFACE"
 
-    log "自定义多IP配置完成：iface=${IFACE}, ip=${IPADDR}/${PREFIX}, family=${IP_FAMILY}"
+    log "自定义IP配置完成：iface=${IFACE}, mode=${OP_MODE}, family=${IP_FAMILY}, ip=${IPADDR}/${PREFIX}"
 }
 
 # =========================================================
