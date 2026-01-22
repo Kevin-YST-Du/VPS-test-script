@@ -852,6 +852,8 @@ set_shortcut() {
 # 13. 自定义添加/替换 IPv4/IPv6 地址（写入 /etc/network/interfaces 并重启网络）
 # - 支持一次输入多个 IP（空格/逗号分隔）
 # - 每个 IP 生成一条 up/down（符合 ip addr add 语法）
+# - 修复：sed 插入时不使用 \n，避免不同系统 sed 行为不一致
+# - 增强：基础校验 IPv4/IPv6 格式（防止把脏数据写进 interfaces）
 # =========================================================
 add_custom_ip() {
     echo -e "${BLUE}===== 自定义添加/替换 IPv4/IPv6 地址（写入 interfaces） =====${NC}"
@@ -946,17 +948,46 @@ add_custom_ip() {
     local IP_LIST
     IP_LIST=$(echo "$IP_LIST_RAW" | tr ',' ' ' | tr -s ' ')
 
+    # 基础校验函数
+    is_ipv4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
+    is_ipv6() { [[ "$1" == *:* ]]; }
+
     # 解析成数组（每个元素可为 ip 或 ip/prefix）
     local IPS=()
     for item in $IP_LIST; do
         item=$(echo "$item" | tr -d '[:space:]')
         [[ -z "$item" ]] && continue
-        # 如果用户没写 /prefix，则自动补默认 PREFIX
+
+        local ip_part="$item"
+        local pfx_part=""
+
         if [[ "$item" == */* ]]; then
-            IPS+=("$item")
+            ip_part="${item%%/*}"
+            pfx_part="${item##*/}"
+            [[ -z "$ip_part" || -z "$pfx_part" ]] && { echo -e "${RED}格式错误：$item${NC}"; return 1; }
+            [[ ! "$pfx_part" =~ ^[0-9]+$ ]] && { echo -e "${RED}前缀错误：$item${NC}"; return 1; }
+
+            if [[ "$ip_choice" == "1" && ( "$pfx_part" -lt 0 || "$pfx_part" -gt 32 ) ]]; then
+                echo -e "${RED}IPv4 前缀范围应为 0-32：$item${NC}"
+                return 1
+            fi
+            if [[ "$ip_choice" == "2" && ( "$pfx_part" -lt 0 || "$pfx_part" -gt 128 ) ]]; then
+                echo -e "${RED}IPv6 前缀范围应为 0-128：$item${NC}"
+                return 1
+            fi
         else
-            IPS+=("${item}/${PREFIX}")
+            # 用户没写 /prefix，则自动补默认 PREFIX
+            pfx_part="$PREFIX"
         fi
+
+        # IP 基础校验
+        if [[ "$ip_choice" == "1" ]]; then
+            is_ipv4 "$ip_part" || { echo -e "${RED}IPv4 格式不正确：$ip_part${NC}"; return 1; }
+        else
+            is_ipv6 "$ip_part" || { echo -e "${RED}IPv6 格式不正确：$ip_part${NC}"; return 1; }
+        fi
+
+        IPS+=("${ip_part}/${pfx_part}")
     done
 
     [[ ${#IPS[@]} -eq 0 ]] && { echo -e "${RED}未解析到有效 IP${NC}"; return 1; }
@@ -1020,7 +1051,7 @@ add_custom_ip() {
             } >> "$IF_FILE"
             log "add 新建 block：${IFACE} ${IP_FAMILY} ${IPS[*]}"
         else
-            # 逐条插入，避免重复
+            # 逐条插入，避免重复（修复：不在 sed 的 i 命令里用 \n）
             local i
             for ((i=0; i<${#LINES_UP[@]}; i++)); do
                 local up_line="${LINES_UP[$i]}"
@@ -1032,9 +1063,10 @@ add_custom_ip() {
                     continue
                 fi
 
-                # 在 END 前插入两行（up + down）
-                sed -i "/${ME_ESC}/i ${up_line}\n${down_line}" "$IF_FILE"
-                log "add 追加写入：${up_line}"
+                # 先插 down 再插 up，最终文件里 up 会在 down 上面
+                sed -i "/${ME_ESC}/i ${down_line}" "$IF_FILE"
+                sed -i "/${ME_ESC}/i ${up_line}" "$IF_FILE"
+                log "add 追加写入：${up_line} && ${down_line}"
             done
         fi
     fi
@@ -1048,6 +1080,7 @@ add_custom_ip() {
     echo -e "${GREEN}当前 ${IFACE} IPv6 地址：${NC}"
     ip -6 addr show dev "$IFACE"
 }
+
 
 # =========================================================
 # 主循环
