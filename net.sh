@@ -1,5 +1,5 @@
 #!/bin/bash
-script_version="v2026-01-15"
+script_version="v2026-01-25"
 check_bash(){
 current_bash_version=$(bash --version|head -n 1|awk '{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+\.[0-9]+(\.[0-9]+)?/) print $i}')
 major_version=$(echo "$current_bash_version"|cut -d'.' -f1)
@@ -392,7 +392,7 @@ local is_stun=1
 if [ "$(uname)" == "Darwin" ]||[ $(id -u) -eq 0 ];then
 usesudo=""
 fi
-if ! jq --version >/dev/null 2>&1||! curl --version >/dev/null 2>&1||! command -v convert >/dev/null 2>&1||! command -v mtr >/dev/null 2>&1||! command -v iperf3 >/dev/null 2>&1||! command -v stun >/dev/null 2>&1||(! command -v stun >/dev/null 2>&1&&! command -v pkg >/dev/null 2>&1&&[[ "$(uname)" != "Darwin" ]])||(! command -v free >/dev/null 2>&1&&[[ "$(uname)" != "Darwin" ]]);then
+if ! jq --version >/dev/null 2>&1||! curl --version >/dev/null 2>&1||! command -v convert >/dev/null 2>&1||! command -v mtr >/dev/null 2>&1||! command -v iperf3 >/dev/null 2>&1||(! command -v stun >/dev/null 2>&1&&command -v apt >/dev/null 2>&1)||(! command -v free >/dev/null 2>&1&&[[ "$(uname)" != "Darwin" ]]);then
 is_dep=0
 fi
 if ! command -v nexttrace >/dev/null 2>&1;then
@@ -406,7 +406,7 @@ is_stun=0
 fi
 if [[ $is_dep -eq 0 || $is_nexttrace -eq 0 || $is_speedtest -eq 0 ]];then
 echo -e "Lacking necessary dependencies."
-[[ $is_dep -eq 0 ]]&&echo -e "Packages $Font_I${Font_Cyan}jq curl imagemagick mtr iperf3 stun bc$Font_Suffix will be installed using ${Font_Green}package manager$Font_Suffix."
+[[ $is_dep -eq 0 ]]&&echo -e "Packages $Font_I${Font_Cyan}jq curl imagemagick mtr iperf3 stun bc$Font_Suffix will be installed using package manager$Font_Suffix."
 [[ $is_nexttrace -eq 0 ]]&&echo -e "Application $Font_I${Font_Cyan}nexttrace$Font_Suffix will be installed via $Font_Green${Font_I}curl nxtrace.org/nt |bash$Font_Suffix by ${Font_U}https://www.nxtrace.org/$Font_Suffix official."
 [[ $is_speedtest -eq 0 ]]&&echo -e "Application $Font_I${Font_Cyan}speedtest$Font_Suffix will be installed using ${Font_B}Speedtest.net$Font_Suffix official installation method ${Font_U}https://www.speedtest.net/apps/cli$Font_Suffix."
 if [[ $mode_yes -eq 0 ]];then
@@ -562,9 +562,9 @@ aarch64|arm64)sys_type="arm64"
 ;;
 i386|i486|i586|i686)sys_type="i386"
 ;;
-mips64|mips64el)echo "mips64el"
+mips64|mips64el)sys_type="mips64el"
 ;;
-riscv64)echo "riscv64"
+riscv64)sys_type="riscv64"
 ;;
 *)return 1
 esac
@@ -3023,7 +3023,7 @@ get_ipv6
 is_valid_ipv4 $IPV4
 is_valid_ipv6 $IPV6
 get_opts "$@"
-[[ mode_no -eq 0 ]]&&install_dependencies
+[[ mode_no -eq 0 ]]&&install_dependencies 1>&2
 set_language
 read_ref
 if [[ $ERRORcode -ne 0 ]];then
